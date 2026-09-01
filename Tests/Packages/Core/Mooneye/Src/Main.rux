@@ -160,14 +160,14 @@ func Main() -> int {
 
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/ei_sequence.gb\0", "ei_sequence", true, "") { allPassed = false; }
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/ei_timing.gb\0", "ei_timing", true, "") { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/halt_ime0_ei.gb\0", "halt_ime0_ei", false, "PPU未実装（フェーズ3）") { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/halt_ime0_nointr_timing.gb\0", "halt_ime0_nointr_timing", false, "PPU未実装（フェーズ3）") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/halt_ime0_ei.gb\0", "halt_ime0_ei", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/halt_ime0_nointr_timing.gb\0", "halt_ime0_nointr_timing", true, "") { allPassed = false; }
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/halt_ime1_timing.gb\0", "halt_ime1_timing", true, "") { allPassed = false; }
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/if_ie_registers.gb\0", "if_ie_registers", true, "") { allPassed = false; }
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/intr_timing.gb\0", "intr_timing", true, "") { allPassed = false; }
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/rapid_di_ei.gb\0", "rapid_di_ei", true, "") { allPassed = false; }
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/reti_intr_timing.gb\0", "reti_intr_timing", true, "") { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/reti_timing.gb\0", "reti_timing", false, "PPU未実装（フェーズ3）") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/reti_timing.gb\0", "reti_timing", false, "OAM DMA未実装") { allPassed = false; }
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/interrupts/ie_push.gb\0", "ie_push", true, "") { allPassed = false; }
 
     if allPassed {

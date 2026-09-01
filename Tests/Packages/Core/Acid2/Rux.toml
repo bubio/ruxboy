@@ -1,0 +1,15 @@
+[Manifest]
+Version = 1
+
+[Package]
+Name = "Acid2Test"
+Version = "0.1.0"
+Type = "Executable"
+Description = "dmg-acid2 PPU rendering regression test (framebuffer hash)"
+
+[Dependencies]
+Core = { Path = "../../../../external/Rux/Packages/Core" }
+GbCore = { Path = "../../../../Packages/Core" }
+
+[Build]
+Output = "../../../../Bin/Tests/Packages/Core"

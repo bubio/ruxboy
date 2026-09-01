@@ -1,0 +1,473 @@
+// PPU: LCD レジスタ、モードタイミング、BG/ウィンドウ/スプライト描画（DMG）。
+// VRAM/OAM は Bus 側に持つ（Ppu 自体には持たない）。
+
+pub const LcdcAddr: uint16 = 0xFF40;
+pub const StatAddr: uint16 = 0xFF41;
+pub const ScyAddr: uint16 = 0xFF42;
+pub const ScxAddr: uint16 = 0xFF43;
+pub const LyAddr: uint16 = 0xFF44;
+pub const LycAddr: uint16 = 0xFF45;
+pub const BgpAddr: uint16 = 0xFF47;
+pub const Obp0Addr: uint16 = 0xFF48;
+pub const Obp1Addr: uint16 = 0xFF49;
+pub const WyAddr: uint16 = 0xFF4A;
+pub const WxAddr: uint16 = 0xFF4B;
+
+pub const LcdcBitLcdEnable: uint8 = 0x80;
+pub const LcdcBitWinMap: uint8 = 0x40;
+pub const LcdcBitWinEnable: uint8 = 0x20;
+pub const LcdcBitBgWinTiles: uint8 = 0x10;
+pub const LcdcBitBgMap: uint8 = 0x08;
+pub const LcdcBitObjSize: uint8 = 0x04;
+pub const LcdcBitObjEnable: uint8 = 0x02;
+pub const LcdcBitBgEnable: uint8 = 0x01;
+
+pub const StatBitLycInt: uint8 = 0x40;
+pub const StatBitOamInt: uint8 = 0x20;
+pub const StatBitVblankInt: uint8 = 0x10;
+pub const StatBitHblankInt: uint8 = 0x08;
+pub const StatBitLycEq: uint8 = 0x04;
+pub const StatWritableMask: uint8 = 0x78;
+
+pub const OamAttrBgPriority: uint8 = 0x80;
+pub const OamAttrYFlip: uint8 = 0x40;
+pub const OamAttrXFlip: uint8 = 0x20;
+pub const OamAttrPalette: uint8 = 0x10;
+
+// PPU モード。STAT bit1-0 と同じ数値。
+pub const ModeHBlank: uint8 = 0;
+pub const ModeVBlank: uint8 = 1;
+pub const ModeOamScan: uint8 = 2;
+pub const ModeDraw: uint8 = 3;
+
+const IntrVBlankBit: uint8 = 0x01;
+const IntrStatBit: uint8 = 0x02;
+
+pub const DmgShade0: uint32 = 0xFFFFFFFF;
+pub const DmgShade1: uint32 = 0xFFAAAAAA;
+pub const DmgShade2: uint32 = 0xFF555555;
+pub const DmgShade3: uint32 = 0xFF000000;
+
+pub const CyclesPerLine: int = 456;
+pub const Mode2Dots: int = 80;
+pub const Mode3Dots: int = 172;
+pub const LinesPerFrame: int = 154;
+pub const VblankStartLine: int = 144;
+
+pub struct Ppu {
+    pub lcdc: uint8;
+    pub statEnable: uint8;
+    pub scy: uint8;
+    pub scx: uint8;
+    pub ly: uint8;
+    pub lyc: uint8;
+    pub bgp: uint8;
+    pub obp0: uint8;
+    pub obp1: uint8;
+    pub wy: uint8;
+    pub wx: uint8;
+
+    pub mode: uint8;
+    pub lycEqual: bool;
+    pub dot: int;
+    pub windowLine: int;
+    pub statIrqLine: bool;
+
+    pub framebuffer: uint32[23040]; // 160x144, ARGB, 行優先
+    pub bgColorIndex: uint8[160]; // 直近描画したラインのカラー番号(パレット適用前)
+}
+
+func PpuUpdateLycEqual(ppu: *var Ppu) {
+    ppu.lycEqual = ppu.ly == ppu.lyc;
+}
+
+pub func PpuPowerOn(ppu: *var Ppu) {
+    ppu.lcdc = 0x91;
+    ppu.statEnable = 0;
+    ppu.scy = 0;
+    ppu.scx = 0;
+    ppu.lyc = 0;
+    ppu.bgp = 0xFC;
+    ppu.obp0 = 0xFF;
+    ppu.obp1 = 0xFF;
+    ppu.wy = 0;
+    ppu.wx = 0;
+    ppu.ly = 0;
+    ppu.dot = 0;
+    ppu.mode = ModeOamScan;
+    ppu.windowLine = 0;
+    ppu.statIrqLine = false;
+    PpuUpdateLycEqual(ppu);
+}
+
+pub func PpuRead(bus: *Bus, addr: uint16) -> uint8 {
+    let ppu = @bus.ppu;
+    if addr == LcdcAddr {
+        return ppu.lcdc;
+    } else if addr == StatAddr {
+        var v: uint8 = 0x80 | ppu.statEnable | ppu.mode;
+        if ppu.lycEqual {
+            v = v | StatBitLycEq;
+        }
+        return v;
+    } else if addr == ScyAddr {
+        return ppu.scy;
+    } else if addr == ScxAddr {
+        return ppu.scx;
+    } else if addr == LyAddr {
+        return ppu.ly;
+    } else if addr == LycAddr {
+        return ppu.lyc;
+    } else if addr == BgpAddr {
+        return ppu.bgp;
+    } else if addr == Obp0Addr {
+        return ppu.obp0;
+    } else if addr == Obp1Addr {
+        return ppu.obp1;
+    } else if addr == WyAddr {
+        return ppu.wy;
+    } else if addr == WxAddr {
+        return ppu.wx;
+    }
+    return 0xFF;
+}
+
+func PpuEnable(ppu: *var Ppu) {
+    ppu.ly = 0;
+    ppu.dot = 0;
+    ppu.mode = ModeOamScan;
+    ppu.windowLine = 0;
+    PpuUpdateLycEqual(ppu);
+}
+
+func PpuDisable(ppu: *var Ppu) {
+    ppu.ly = 0;
+    ppu.dot = 0;
+    ppu.mode = ModeHBlank;
+    PpuUpdateLycEqual(ppu);
+}
+
+func PpuStatConditionLine(ppu: *Ppu) -> bool {
+    if ppu.lycEqual && (ppu.statEnable & StatBitLycInt) != 0 {
+        return true;
+    }
+    if ppu.mode == ModeOamScan {
+        return (ppu.statEnable & StatBitOamInt) != 0;
+    } else if ppu.mode == ModeVBlank {
+        return (ppu.statEnable & StatBitVblankInt) != 0;
+    } else if ppu.mode == ModeHBlank {
+        return (ppu.statEnable & StatBitHblankInt) != 0;
+    }
+    return false; // Draw
+}
+
+func PpuUpdateStatIrq(bus: *var Bus) {
+    let line = PpuStatConditionLine(@bus.ppu);
+    if line && !bus.ppu.statIrqLine {
+        bus.io[0x0F] = bus.io[0x0F] | IntrStatBit;
+    }
+    bus.ppu.statIrqLine = line;
+}
+
+pub func PpuWrite(bus: *var Bus, addr: uint16, value: uint8) {
+    if addr == LcdcAddr {
+        let wasEnabled = (bus.ppu.lcdc & LcdcBitLcdEnable) != 0;
+        bus.ppu.lcdc = value;
+        let nowEnabled = (bus.ppu.lcdc & LcdcBitLcdEnable) != 0;
+        if !wasEnabled && nowEnabled {
+            PpuEnable(@bus.ppu);
+        } else if wasEnabled && !nowEnabled {
+            PpuDisable(@bus.ppu);
+        }
+        PpuUpdateStatIrq(bus);
+    } else if addr == StatAddr {
+        bus.ppu.statEnable = value & StatWritableMask;
+        PpuUpdateStatIrq(bus);
+    } else if addr == ScyAddr {
+        bus.ppu.scy = value;
+    } else if addr == ScxAddr {
+        bus.ppu.scx = value;
+    } else if addr == LyAddr {
+        // 読み取り専用: 書き込みは無視(リセットではない)
+    } else if addr == LycAddr {
+        bus.ppu.lyc = value;
+        PpuUpdateLycEqual(@bus.ppu);
+        PpuUpdateStatIrq(bus);
+    } else if addr == BgpAddr {
+        bus.ppu.bgp = value;
+    } else if addr == Obp0Addr {
+        bus.ppu.obp0 = value;
+    } else if addr == Obp1Addr {
+        bus.ppu.obp1 = value;
+    } else if addr == WyAddr {
+        bus.ppu.wy = value;
+    } else if addr == WxAddr {
+        bus.ppu.wx = value;
+    }
+}
+
+func PpuModeFor(ly: uint8, dot: int) -> uint8 {
+    if (ly as int) >= VblankStartLine {
+        return ModeVBlank;
+    }
+    if dot < Mode2Dots {
+        return ModeOamScan;
+    }
+    if dot < Mode2Dots + Mode3Dots {
+        return ModeDraw;
+    }
+    return ModeHBlank;
+}
+
+func DmgShade(shade: uint8) -> uint32 {
+    let s = shade & 0x03;
+    if s == 0 {
+        return DmgShade0;
+    } else if s == 1 {
+        return DmgShade1;
+    } else if s == 2 {
+        return DmgShade2;
+    }
+    return DmgShade3;
+}
+
+func BgTileDataAddr(lcdc: uint8, tileIndex: uint8, rowInTile: int) -> uint16 {
+    if (lcdc & LcdcBitBgWinTiles) != 0 {
+        return (0x8000 + (tileIndex as int) * 16 + rowInTile * 2) as uint16;
+    }
+    let signedIndex = (tileIndex as int8) as int;
+    return (0x9000 + signedIndex * 16 + rowInTile * 2) as uint16;
+}
+
+func TilePixelColorNumber(bus: *Bus, tileAddr: uint16, colInTile: int) -> uint8 {
+    let low = bus.vram[(tileAddr - 0x8000) as uint];
+    let high = bus.vram[(tileAddr - 0x8000 + 1) as uint];
+    let shift = (7 - colInTile) as uint;
+    let lowBit = (low >> shift) & 0x01;
+    let highBit = (high >> shift) & 0x01;
+    return lowBit | (highBit << 1);
+}
+
+func TileMapPixelColorNumber(bus: *Bus, mapBase: uint16, lcdc: uint8, sourceX: int, sourceY: int) -> uint8 {
+    let tileCol = sourceX / 8;
+    let tileRow = sourceY / 8;
+    let tileMapAddr = mapBase + ((tileRow * 32 + tileCol) as uint16);
+    let tileIndex = bus.vram[(tileMapAddr - 0x8000) as uint];
+
+    let rowInTile = sourceY % 8;
+    let colInTile = sourceX % 8;
+
+    let tileAddr = BgTileDataAddr(lcdc, tileIndex, rowInTile);
+    return TilePixelColorNumber(bus, tileAddr, colInTile);
+}
+
+func PpuRenderScanline(bus: *var Bus) {
+    let ly = bus.ppu.ly as int;
+    if ly >= 144 {
+        return;
+    }
+    let lineStart = (ly * 160) as uint;
+
+    if (bus.ppu.lcdc & LcdcBitBgEnable) == 0 {
+        var x: uint = 0;
+        while x < 160 {
+            bus.ppu.framebuffer[lineStart + x] = DmgShade0;
+            bus.ppu.bgColorIndex[x] = 0;
+            x += 1;
+        }
+        PpuRenderSprites(bus, lineStart);
+        return;
+    }
+
+    var bgMapBase: uint16 = 0x9800;
+    if (bus.ppu.lcdc & LcdcBitBgMap) != 0 {
+        bgMapBase = 0x9C00;
+    }
+
+    var winMapBase: uint16 = 0x9800;
+    if (bus.ppu.lcdc & LcdcBitWinMap) != 0 {
+        winMapBase = 0x9C00;
+    }
+
+    let winEnabled = (bus.ppu.lcdc & LcdcBitWinEnable) != 0;
+    let wxMinus7 = (bus.ppu.wx as int) - 7;
+    let winVisibleThisLine = winEnabled && ly >= (bus.ppu.wy as int) && wxMinus7 < 160;
+
+    var x: uint = 0;
+    while x < 160 {
+        var colorNumber: uint8 = 0;
+        if winVisibleThisLine && (x as int) >= wxMinus7 {
+            colorNumber = TileMapPixelColorNumber(bus, winMapBase, bus.ppu.lcdc, (x as int) - wxMinus7, bus.ppu.windowLine);
+        } else {
+            let sourceX = ((x as int) + (bus.ppu.scx as int)) & 0xFF;
+            let sourceY = (ly + (bus.ppu.scy as int)) & 0xFF;
+            colorNumber = TileMapPixelColorNumber(bus, bgMapBase, bus.ppu.lcdc, sourceX, sourceY);
+        }
+
+        bus.ppu.bgColorIndex[x] = colorNumber;
+        let shade = (bus.ppu.bgp >> (colorNumber * 2)) & 0x03;
+        bus.ppu.framebuffer[lineStart + x] = DmgShade(shade);
+        x += 1;
+    }
+
+    if winVisibleThisLine {
+        bus.ppu.windowLine += 1;
+    }
+
+    PpuRenderSprites(bus, lineStart);
+}
+
+func PpuRenderSprites(bus: *var Bus, lineStart: uint) {
+    if (bus.ppu.lcdc & LcdcBitObjEnable) == 0 {
+        return;
+    }
+
+    var spriteHeight: int = 8;
+    if (bus.ppu.lcdc & LcdcBitObjSize) != 0 {
+        spriteHeight = 16;
+    }
+
+    // OAM 収集(先着10個、OAM順)。X座標で挿入ソートし、同Xなら OAM 順。
+    var spriteIndex: int[10];
+    var spriteX: int[10];
+    var spriteY: int[10];
+    var spriteTile: uint8[10];
+    var spriteAttr: uint8[10];
+    var count: int = 0;
+
+    let ly = bus.ppu.ly as int;
+    var i: int = 0;
+    while i < 40 && count < 10 {
+        let base = (i * 4) as uint;
+        let y = (bus.oam[base + 0] as int) - 16;
+        let yInSprite = ly - y;
+        if yInSprite >= 0 && yInSprite < spriteHeight {
+            spriteIndex[count] = i;
+            spriteX[count] = (bus.oam[base + 1] as int) - 8;
+            spriteY[count] = y;
+            spriteTile[count] = bus.oam[base + 2];
+            spriteAttr[count] = bus.oam[base + 3];
+            count += 1;
+        }
+        i += 1;
+    }
+
+    if count == 0 {
+        return;
+    }
+
+    // 挿入ソート: X優先、同Xなら OAM index 優先(小さい方が勝つ)
+    var j: int = 1;
+    while j < count {
+        let curIndex = spriteIndex[j];
+        let curX = spriteX[j];
+        let curY = spriteY[j];
+        let curTile = spriteTile[j];
+        let curAttr = spriteAttr[j];
+        var k = j - 1;
+        while k >= 0 && (spriteX[k] > curX || (spriteX[k] == curX && spriteIndex[k] > curIndex)) {
+            spriteIndex[k + 1] = spriteIndex[k];
+            spriteX[k + 1] = spriteX[k];
+            spriteY[k + 1] = spriteY[k];
+            spriteTile[k + 1] = spriteTile[k];
+            spriteAttr[k + 1] = spriteAttr[k];
+            k -= 1;
+        }
+        spriteIndex[k + 1] = curIndex;
+        spriteX[k + 1] = curX;
+        spriteY[k + 1] = curY;
+        spriteTile[k + 1] = curTile;
+        spriteAttr[k + 1] = curAttr;
+        j += 1;
+    }
+
+    var pixelOwned: bool[160];
+    var p: uint = 0;
+    while p < 160 {
+        pixelOwned[p] = false;
+        p += 1;
+    }
+
+    var s: int = 0;
+    while s < count {
+        var tileIndex = spriteTile[s];
+        if spriteHeight == 16 {
+            tileIndex = tileIndex & 0xFE;
+        }
+        let attr = spriteAttr[s];
+
+        var yInSprite = ly - spriteY[s];
+        if (attr & OamAttrYFlip) != 0 {
+            yInSprite = spriteHeight - 1 - yInSprite;
+        }
+        var tileOffset: uint8 = 0;
+        if spriteHeight == 16 && yInSprite >= 8 {
+            tileOffset = 1;
+        }
+        let rowInTile = yInSprite % 8;
+        let tileAddr = (0x8000 + ((tileIndex + tileOffset) as int) * 16 + rowInTile * 2) as uint16;
+
+        var col: int = 0;
+        while col < 8 {
+            let x = spriteX[s] + col;
+            if x >= 0 && x < 160 && !pixelOwned[x as uint] {
+                var sourceCol = col;
+                if (attr & OamAttrXFlip) != 0 {
+                    sourceCol = 7 - col;
+                }
+                let colorNumber = TilePixelColorNumber(bus, tileAddr, sourceCol);
+                if colorNumber != 0 {
+                    pixelOwned[x as uint] = true;
+
+                    var draw = true;
+                    if (attr & OamAttrBgPriority) != 0 && bus.ppu.bgColorIndex[x as uint] != 0 {
+                        draw = false;
+                    }
+
+                    if draw {
+                        var palette = bus.ppu.obp0;
+                        if (attr & OamAttrPalette) != 0 {
+                            palette = bus.ppu.obp1;
+                        }
+                        let shade = (palette >> (colorNumber * 2)) & 0x03;
+                        bus.ppu.framebuffer[lineStart + (x as uint)] = DmgShade(shade);
+                    }
+                }
+            }
+            col += 1;
+        }
+        s += 1;
+    }
+}
+
+pub func PpuTick(bus: *var Bus, tCycles: int) {
+    if (bus.ppu.lcdc & LcdcBitLcdEnable) == 0 {
+        return;
+    }
+
+    var cycle: int = 0;
+    while cycle < tCycles {
+        let prevMode = bus.ppu.mode;
+        bus.ppu.dot += 1;
+        if bus.ppu.dot >= CyclesPerLine {
+            bus.ppu.dot = 0;
+            bus.ppu.ly += 1;
+            if (bus.ppu.ly as int) >= LinesPerFrame {
+                bus.ppu.ly = 0;
+                bus.ppu.windowLine = 0;
+            }
+            PpuUpdateLycEqual(@bus.ppu);
+        }
+        bus.ppu.mode = PpuModeFor(bus.ppu.ly, bus.ppu.dot);
+
+        if prevMode != ModeVBlank && bus.ppu.mode == ModeVBlank {
+            bus.io[0x0F] = bus.io[0x0F] | IntrVBlankBit;
+        }
+        if prevMode == ModeDraw && bus.ppu.mode == ModeHBlank {
+            PpuRenderScanline(bus);
+        }
+
+        PpuUpdateStatIrq(bus);
+        cycle += 1;
+    }
+}

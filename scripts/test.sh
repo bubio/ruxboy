@@ -30,4 +30,7 @@ echo "=== Running BlarggTest ==="
 echo "=== Running MooneyeTest ==="
 (cd "$dir/Tests/Packages/Core/Mooneye" && "$rux" run ${1:+"$1"})
 
+echo "=== Running Acid2Test ==="
+(cd "$dir/Tests/Packages/Core/Acid2" && "$rux" run ${1:+"$1"})
+
 echo "=== All Tests Passed! ==="

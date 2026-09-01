@@ -37,6 +37,9 @@ pub struct Bus {
     // Serial (Phase 1 T1-7)
     pub serialLog: uint8[16384];
     pub serialLogLength: uint;
+
+    // PPU
+    pub ppu: Ppu;
 }
 
 pub func BusInit(bus: *var Bus) {
@@ -76,7 +79,7 @@ pub func BusLoadRom(bus: *var Bus, data: Slice<uint8>) -> bool {
 }
 
 pub func BusPowerOn(bus: *var Bus) {
-    // Phase 1 では未実装レジスタの初期値設定
+    PpuPowerOn(@bus.ppu);
 }
 
 // bus_tick は t_cycles ぶん時間を進める。CPU の全メモリアクセスごとに呼ばれる。
@@ -86,6 +89,7 @@ pub func BusTick(bus: *var Bus, tCycles: int) {
     bus.hwCycles += cyclesU;
 
     TimerTick(bus, tCycles);
+    PpuTick(bus, tCycles);
 }
 
 func TimerSelectedBit(tac: uint8) -> uint {
@@ -206,6 +210,9 @@ func BusIoRead(bus: *Bus, addr: uint16) -> uint8 {
         return bus.io[0x0F] | 0xE0;
     } else if addr == 0xFF01 || addr == 0xFF02 {
         return bus.io[(addr - 0xFF00) as uint];
+    } else if (addr >= 0xFF40 && addr <= 0xFF45) || (addr >= 0xFF47 && addr <= 0xFF4B) {
+        // FF46 (OAM DMA) は PPU レジスタではないため対象外(未実装、フェーズ3の別課題)
+        return PpuRead(bus, addr);
     }
     return 0xFF;
 }
@@ -240,6 +247,8 @@ func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
         bus.io[0x01] = value;
     } else if addr == 0xFF02 {
         SerialWrite(bus, addr, value);
+    } else if (addr >= 0xFF40 && addr <= 0xFF45) || (addr >= 0xFF47 && addr <= 0xFF4B) {
+        PpuWrite(bus, addr, value);
     } else {
         bus.io[(addr - 0xFF00) as uint] = value;
     }

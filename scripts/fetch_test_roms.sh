@@ -18,7 +18,8 @@ MOONEYE_COMMIT="6745fe8ccc5e8035e104934dcea8c6500171b65e"
 MOONEYE_BASE_URL="https://raw.githubusercontent.com/asoderman/Mooneye-Test-Suite-ROMS/$MOONEYE_COMMIT"
 
 mkdir -p "$BLARGG_DIR/cpu_instrs/individual" "$BLARGG_DIR/instr_timing" \
-	"$ROMS_DIR/mooneye/acceptance/timer" "$ROMS_DIR/mooneye/acceptance/interrupts"
+	"$ROMS_DIR/mooneye/acceptance/timer" "$ROMS_DIR/mooneye/acceptance/interrupts" \
+	"$ROMS_DIR/acid2"
 
 fetch() {
 	remote_path="$1"
@@ -93,5 +94,22 @@ do
 	fetch_mooneye "acceptance/$name.gb" "$ROMS_DIR/mooneye/acceptance/$name.gb"
 done
 fetch_mooneye "acceptance/interrupts/ie_push.gb" "$ROMS_DIR/mooneye/acceptance/interrupts/ie_push.gb"
+
+# dmg-acid2 (フェーズ3): mattcurrie/dmg-acid2 のリリース資産から直接取得する
+# (retrio/gb-test-roms や asoderman/Mooneye-Test-Suite-ROMS とはリポジトリが異なる)。
+ACID2_ROM_URL="https://github.com/mattcurrie/dmg-acid2/releases/download/v1.0/dmg-acid2.gb"
+ACID2_ROM_PATH="$ROMS_DIR/acid2/dmg-acid2.gb"
+if [ -f "$ACID2_ROM_PATH" ]; then
+	echo "fetch_test_roms.sh: 取得済み、スキップ: $ACID2_ROM_PATH"
+else
+	echo "fetch_test_roms.sh: 取得中: $ACID2_ROM_URL"
+	tmp_path="$ACID2_ROM_PATH.tmp"
+	if curl -fsSL --retry 3 --retry-delay 2 -o "$tmp_path" "$ACID2_ROM_URL"; then
+		mv "$tmp_path" "$ACID2_ROM_PATH"
+	else
+		rm -f "$tmp_path"
+		echo "fetch_test_roms.sh: 取得失敗: $ACID2_ROM_URL" >&2
+	fi
+fi
 
 echo "fetch_test_roms.sh: 完了。配置先: $ROMS_DIR"
