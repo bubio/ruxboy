@@ -135,8 +135,7 @@ func Main() -> int {
     var allPassed = true;
 
     if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/01-special.gb\0", "01-special", true) { allPassed = false; }
-    // 02-interrupts is expected to fail in Phase 1 (passes in Phase 2)
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/02-interrupts.gb\0", "02-interrupts (expected fail)", false) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/02-interrupts.gb\0", "02-interrupts", true) { allPassed = false; }
     if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/03-op sp,hl.gb\0", "03-op sp,hl", true) { allPassed = false; }
     if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/04-op r,imm.gb\0", "04-op r,imm", true) { allPassed = false; }
     if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/05-op rp.gb\0", "05-op rp", true) { allPassed = false; }

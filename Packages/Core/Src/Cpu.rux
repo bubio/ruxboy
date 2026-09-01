@@ -318,6 +318,50 @@ func InterruptPending(bus: *Bus) -> uint8 {
     return (bus.io[0x0F] & 0x1F) & (bus.ie & 0x1F);
 }
 
+func HandleInterrupts(cpu: *var Cpu, bus: *var Bus) -> bool {
+    let pending = InterruptPending(bus);
+    if pending == 0 {
+        return false;
+    }
+    if !cpu.ime {
+        return false;
+    }
+
+    // HALT 解除直後でも、割り込み受理時は通常命令フェッチせずベクタへ遷移する
+    cpu.halted = false;
+    cpu.ime = false;
+    cpu.imeDelay = 0;
+
+    var vector: uint16 = 0x40;
+    var mask: uint8 = 0x01;
+    if (pending & 0x01) != 0 {
+        vector = 0x40;
+        mask = 0x01;
+    } else if (pending & 0x02) != 0 {
+        vector = 0x48;
+        mask = 0x02;
+    } else if (pending & 0x04) != 0 {
+        vector = 0x50;
+        mask = 0x04;
+    } else if (pending & 0x08) != 0 {
+        vector = 0x58;
+        mask = 0x08;
+    } else {
+        vector = 0x60;
+        mask = 0x10;
+    }
+
+    // IF の対応ビットをクリア
+    bus.io[0x0F] = bus.io[0x0F] & ~mask;
+
+    // 割り込み受理シーケンス (5 M-cycle = 20 T-cycle)
+    BusTick(bus, 4);
+    BusTick(bus, 4);
+    Push16(cpu, bus, cpu.pc);
+    cpu.pc = vector;
+    return true;
+}
+
 // cpu_step は 1 命令を実行し、消費した T-cycle 数を返す
 pub func CpuStep(cpu: *var Cpu, bus: *var Bus) -> int {
     let start = bus.cycles;
@@ -336,6 +380,10 @@ pub func CpuStep(cpu: *var Cpu, bus: *var Bus) -> int {
             BusTick(bus, 4);
             return (bus.cycles - start) as int;
         }
+    }
+
+    if HandleInterrupts(cpu, bus) {
+        return (bus.cycles - start) as int;
     }
 
     let opcode = CpuRead8(cpu, bus, cpu.pc);
