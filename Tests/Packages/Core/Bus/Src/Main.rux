@@ -54,5 +54,11 @@ func Main() -> int {
     if !loaded { return 13; }
     if BusRead(@bus, 0x0001) != 0xC3 { return 14; }
 
+    // Test 9: DIV reset affects the visible register
+    BusTick(@bus, 256);
+    if BusRead(@bus, 0xFF04) == 0x00 { return 15; }
+    BusWrite(@bus, 0xFF04, 0xAA);
+    if BusRead(@bus, 0xFF04) != 0x00 { return 16; }
+
     return 0;
 }

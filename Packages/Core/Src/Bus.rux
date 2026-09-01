@@ -107,6 +107,8 @@ pub func BusTick(bus: *var Bus, tCycles: int) {
             }
         }
     }
+
+    bus.io[0x0F] = bus.io[0x0F] | 0xE0;
 }
 
 pub func BusRead(bus: *Bus, addr: uint16) -> uint8 {
@@ -184,6 +186,7 @@ func BusIoRead(bus: *Bus, addr: uint16) -> uint8 {
 func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
     if addr == 0xFF04 {
         bus.divCounter = 0;
+        bus.io[0x04] = 0;
     } else if addr == 0xFF05 {
         bus.tima = value;
     } else if addr == 0xFF06 {
@@ -191,7 +194,7 @@ func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
     } else if addr == 0xFF07 {
         bus.tac = value;
     } else if addr == 0xFF0F {
-        bus.io[0x0F] = value;
+        bus.io[0x0F] = value | 0xE0;
     } else if addr == 0xFF01 {
         bus.io[0x01] = value;
     } else if addr == 0xFF02 {
