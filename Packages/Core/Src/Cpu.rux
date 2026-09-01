@@ -366,13 +366,6 @@ func HandleInterrupts(cpu: *var Cpu, bus: *var Bus) -> bool {
 pub func CpuStep(cpu: *var Cpu, bus: *var Bus) -> int {
     let start = bus.cycles;
 
-    if cpu.imeDelay > 0 {
-        cpu.imeDelay -= 1;
-        if cpu.imeDelay == 0 {
-            cpu.ime = true;
-        }
-    }
-
     if cpu.halted {
         if InterruptPending(bus) != 0 {
             cpu.halted = false;
@@ -384,6 +377,17 @@ pub func CpuStep(cpu: *var Cpu, bus: *var Bus) -> int {
 
     if HandleInterrupts(cpu, bus) {
         return (bus.cycles - start) as int;
+    }
+
+    // EI の効果は「次の1命令」実行後まで遅延する。ここでの解決は
+    // 上の割り込み受理チェック(この命令の直前)より後、命令フェッチより前に
+    // 行うことで、EI 直後の命令は必ず割り込みなしで実行され、
+    // その次の命令フェッチ時点で初めて IME=1 として扱われる。
+    if cpu.imeDelay > 0 {
+        cpu.imeDelay -= 1;
+        if cpu.imeDelay == 0 {
+            cpu.ime = true;
+        }
     }
 
     let opcode = CpuRead8(cpu, bus, cpu.pc);
@@ -691,7 +695,7 @@ pub func CpuExecute(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
         cpu.ime = false;
         cpu.imeDelay = 0;
     } else if opcode == 0xFB {
-        cpu.imeDelay = 2;
+        cpu.imeDelay = 1;
     }
     // --- アキュムレータ回転 (非CB版は常に Z=0) ---
     else if opcode == 0x07 { // RLCA

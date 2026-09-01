@@ -49,7 +49,7 @@ func OpenRom(path: Slice<char8>) -> int32 {
     return open(@buf[0], 0);
 }
 
-func RunMooneyeRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool) -> bool {
+func RunMooneyeRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool, failReason: Slice<char8>) -> bool {
     let fd = OpenRom(path);
     if fd < 0 {
         Print("ROM not found (skipped): ");
@@ -93,7 +93,9 @@ func RunMooneyeRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool) -
                 return true;
             }
             if !expectedPass {
-                Print("EXPECTED FAIL (known timer timing difference): ");
+                Print("EXPECTED FAIL (");
+                Print(failReason);
+                Print("): ");
                 PrintLine(name);
                 return true;
             }
@@ -127,7 +129,9 @@ func RunMooneyeRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool) -
     }
 
     if !expectedPass {
-        Print("EXPECTED FAIL (timeout): ");
+        Print("EXPECTED FAIL (");
+        Print(failReason);
+        Print(", timeout): ");
         PrintLine(name);
         return true;
     }
@@ -137,27 +141,39 @@ func RunMooneyeRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool) -
 }
 
 func Main() -> int {
-    PrintLine("=== Running Mooneye Timer Acceptance Tests ===");
+    PrintLine("=== Running Mooneye Acceptance Tests (Timer + Interrupts) ===");
 
     var allPassed = true;
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/div_write.gb\0", "div_write", true) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/rapid_toggle.gb\0", "rapid_toggle", false) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim00.gb\0", "tim00", true) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim00_div_trigger.gb\0", "tim00_div_trigger", true) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim01.gb\0", "tim01", true) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim01_div_trigger.gb\0", "tim01_div_trigger", true) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim10.gb\0", "tim10", true) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim10_div_trigger.gb\0", "tim10_div_trigger", true) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim11.gb\0", "tim11", true) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim11_div_trigger.gb\0", "tim11_div_trigger", true) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tima_reload.gb\0", "tima_reload", true) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tima_write_reloading.gb\0", "tima_write_reloading", true) { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tma_write_reloading.gb\0", "tma_write_reloading", true) { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/div_write.gb\0", "div_write", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/rapid_toggle.gb\0", "rapid_toggle", false, "known timer timing difference") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim00.gb\0", "tim00", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim00_div_trigger.gb\0", "tim00_div_trigger", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim01.gb\0", "tim01", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim01_div_trigger.gb\0", "tim01_div_trigger", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim10.gb\0", "tim10", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim10_div_trigger.gb\0", "tim10_div_trigger", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim11.gb\0", "tim11", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tim11_div_trigger.gb\0", "tim11_div_trigger", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tima_reload.gb\0", "tima_reload", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tima_write_reloading.gb\0", "tima_write_reloading", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/timer/tma_write_reloading.gb\0", "tma_write_reloading", true, "") { allPassed = false; }
+
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/ei_sequence.gb\0", "ei_sequence", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/ei_timing.gb\0", "ei_timing", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/halt_ime0_ei.gb\0", "halt_ime0_ei", false, "PPU未実装（フェーズ3）") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/halt_ime0_nointr_timing.gb\0", "halt_ime0_nointr_timing", false, "PPU未実装（フェーズ3）") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/halt_ime1_timing.gb\0", "halt_ime1_timing", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/if_ie_registers.gb\0", "if_ie_registers", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/intr_timing.gb\0", "intr_timing", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/rapid_di_ei.gb\0", "rapid_di_ei", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/reti_intr_timing.gb\0", "reti_intr_timing", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/reti_timing.gb\0", "reti_timing", false, "PPU未実装（フェーズ3）") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/interrupts/ie_push.gb\0", "ie_push", true, "") { allPassed = false; }
 
     if allPassed {
-        PrintLine("=== All Mooneye Timer Tests Passed! ===");
+        PrintLine("=== All Mooneye Tests Passed! ===");
         return 0;
     }
-    PrintLine("=== Some Mooneye Timer Tests Failed! ===");
+    PrintLine("=== Some Mooneye Tests Failed! ===");
     return 1;
 }

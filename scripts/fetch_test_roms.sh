@@ -18,7 +18,7 @@ MOONEYE_COMMIT="6745fe8ccc5e8035e104934dcea8c6500171b65e"
 MOONEYE_BASE_URL="https://raw.githubusercontent.com/asoderman/Mooneye-Test-Suite-ROMS/$MOONEYE_COMMIT"
 
 mkdir -p "$BLARGG_DIR/cpu_instrs/individual" "$BLARGG_DIR/instr_timing" \
-	"$ROMS_DIR/mooneye/acceptance/timer"
+	"$ROMS_DIR/mooneye/acceptance/timer" "$ROMS_DIR/mooneye/acceptance/interrupts"
 
 fetch() {
 	remote_path="$1"
@@ -84,5 +84,14 @@ for name in div_write rapid_toggle tim00 tim00_div_trigger tim01 tim01_div_trigg
 do
 	fetch_mooneye "acceptance/timer/$name.gb" "$ROMS_DIR/mooneye/acceptance/timer/$name.gb"
 done
+
+# acceptance/interrupts: 割り込み系 acceptance ROM（フェーズ2）
+for name in ei_sequence ei_timing halt_ime0_ei halt_ime0_nointr_timing \
+	halt_ime1_timing if_ie_registers intr_timing rapid_di_ei \
+	reti_intr_timing reti_timing
+do
+	fetch_mooneye "acceptance/$name.gb" "$ROMS_DIR/mooneye/acceptance/$name.gb"
+done
+fetch_mooneye "acceptance/interrupts/ie_push.gb" "$ROMS_DIR/mooneye/acceptance/interrupts/ie_push.gb"
 
 echo "fetch_test_roms.sh: 完了。配置先: $ROMS_DIR"
