@@ -1,0 +1,309 @@
+import Core::{ Slice, #target };
+// RuxBoy 技術検証: Rux 0.4.0 + SDL3 でエミュレーターに必要な機能が揃うかを確かめる。
+//
+// 検証項目
+//   1. ウィンドウ + レンダラの生成
+//   2. 160x144 ストリーミングテクスチャへの毎フレーム転送（= GBC のフレームバッファ）
+//   3. 整数倍スケーリングと nearest/smooth の切り替え（= --scale / --shader）
+//   4. イベントポーリング（キー入力・終了）
+//   5. 音声ストリームへのサンプル投入（= APU 出力）
+//   6. 時間計測（= フレームペーシング）
+//   7. 描画結果の読み戻しと BMP 保存（ヘッドレスでの目視確認用）
+
+
+const ScreenWidth: int32 = 160;
+const ScreenHeight: int32 = 144;
+const PixelCount: uint = 23040;          // 160 * 144
+const Scale: int32 = 4;
+
+const AudioFreq: int32 = 48000;
+const AudioChannels: int32 = 2;
+const AudioDefaultPlayback: uint32 = 0xFFFFFFFF;
+
+const MaxFrames: uint32 = 120;           // 非対話実行でも必ず終了する
+const CaptureFrame: uint32 = 60;
+
+// Rux にはモジュールスコープの可変変数がない（const のみ）。
+// 集計はポインタで持ち回す。
+struct Report {
+    passed: uint32;
+    failed: uint32;
+}
+
+func Check(report: *var Report, label: Slice<char8>, ok: bool) {
+    if ok {
+        report.passed += 1;
+        Print("  [ok]   ");
+    } else {
+        report.failed += 1;
+        Print("  [FAIL] ");
+    }
+    Print(label);
+    Print("\n");
+    if !ok {
+        Print("         SDL_GetError: ");
+        PrintCString(SDL_GetError());
+        Print("\n");
+    }
+}
+
+// 市松模様 + 走査するバーを ARGB8888 で描く。ROM がなくても
+// 「毎フレーム内容が変わるフレームバッファ」を再現できる。
+func RenderPattern(fb: *var uint32, frame: uint32) {
+    var y: uint = 0;
+    while y < 144 {
+        var x: uint = 0;
+        while x < 160 {
+            let tile = ((x / 8) + (y / 8)) % 2;
+            var color: uint32 = 0xFF0F380F;          // GB 風の濃緑
+            if tile == 1 {
+                color = 0xFF9BBC0F;                  // GB 風の淡緑
+            }
+            let bar = (frame as uint * 2) % 160;
+            if x >= bar && x < bar + 8 {
+                color = 0xFFE0F8D0;                  // 走査バー
+            }
+            *(fb + (y * 160 + x)) = color;
+            x += 1;
+        }
+        y += 1;
+    }
+}
+
+// 440Hz の矩形波を 1 フレーム分だけ生成する（S16 ステレオ）。
+func FillSquareWave(buf: *var int16, frames: uint, phase: *var uint) {
+    var i: uint = 0;
+    var p = *phase;
+    while i < frames {
+        var sample: int16 = 3000;
+        if (p / 54) % 2 == 1 {                       // 48000 / 440 / 2 ≒ 54
+            sample = -3000;
+        }
+        *(buf + (i * 2)) = sample;
+        *(buf + (i * 2 + 1)) = sample;
+        p += 1;
+        i += 1;
+    }
+    *phase = p;
+}
+
+func Main() -> int {
+    var report = Report { passed: 0, failed: 0 };
+    PrintLine("RuxBoy spike: Rux + SDL3 feasibility probe");
+
+    // --- 0. 言語側の前提を実測で確かめる --------------------------------
+    // GBC の CPU コアは uint8 / uint16 のラップアラウンドに全面的に依存する。
+    // ドキュメントは debug/release ともラップすると書いているが、移植可否を
+    // 左右する条件なので実際に確かめる（このバイナリは debug ビルド）。
+    var wrap8: uint8 = 255;
+    wrap8 += 1;
+    var wrap16: uint16 = 0;
+    wrap16 -= 1;
+    Check(@report, "uint8 255+1 wraps to 0 (no trap)", wrap8 == 0);
+    Check(@report, "uint16 0-1 wraps to 65535 (no trap)", wrap16 == 65535);
+    // C の SDL_Event と同じ 128 バイトであること = 構造体レイアウトの C 互換性
+    Check(@report, "sizeof(SdlEvent) == 128 (C layout compatible)", sizeof(SdlEvent) == 128);
+    // コンパイル時のプラットフォーム分岐（--target を変えれば別の枝が残る）
+    var onMacOS = false;
+    when #target.os == .macOS {
+        onMacOS = true;
+    }
+    Check(@report, "when #target.os == .macOS selects this branch", onMacOS);
+    // C の可変長引数関数を正しく呼べるか。libSystem の snprintf で往復させる。
+    var text: char8[32];
+    let written = snprintf(@text[0], 32u, "%d/%d".data, 160, 144);
+    Check(@report, "C variadic call (snprintf) passes arguments correctly",
+          written == 7 && text[0] == c8'1' && text[3] == c8'/' && text[6] == c8'4');
+
+    // --- 1. 初期化 ------------------------------------------------------
+    SDL_SetMainReady();                              // SDL_main シムを経由しないため必須
+    let version = SDL_GetVersion();
+    PrintUIntLine("  SDL version: ", version as uint64);
+
+    Check(@report, "SDL_Init(VIDEO | AUDIO)", SDL_Init(SdlInitVideo | SdlInitAudio));
+
+    let title = "RuxBoy SDL3 Probe\0";
+    let window = SDL_CreateWindow(title.data, ScreenWidth * Scale, ScreenHeight * Scale, 0);
+    Check(@report, "SDL_CreateWindow", window != null);
+    if window == null {
+        return 1;
+    }
+
+    let renderer = SDL_CreateRenderer(window, null);
+    Check(@report, "SDL_CreateRenderer", renderer != null);
+    if renderer == null {
+        return 1;
+    }
+
+    // --- 2. フレームバッファ用テクスチャ --------------------------------
+    let texture = SDL_CreateTexture(renderer, SdlPixelFormatArgb8888,
+                                    SdlTextureAccessStreaming, ScreenWidth, ScreenHeight);
+    Check(@report, "SDL_CreateTexture(160x144 streaming ARGB8888)", texture != null);
+    if texture == null {
+        return 1;
+    }
+
+    // --- 3. スケーリング -------------------------------------------------
+    Check(@report, "SDL_SetTextureScaleMode(nearest)",
+          SDL_SetTextureScaleMode(texture, SdlScaleModeNearest));
+    Check(@report, "SDL_SetRenderLogicalPresentation(integer scale)",
+          SDL_SetRenderLogicalPresentation(renderer, ScreenWidth, ScreenHeight,
+                                           SdlLogicalPresentationIntegerScale));
+
+    // --- 5. 音声 ---------------------------------------------------------
+    let spec = SdlAudioSpec { format: SdlAudioS16Le, channels: AudioChannels, freq: AudioFreq };
+    let stream = SDL_OpenAudioDeviceStream(AudioDefaultPlayback, @spec, null, null);
+    Check(@report, "SDL_OpenAudioDeviceStream(48kHz S16 stereo)", stream != null);
+    if stream != null {
+        Check(@report, "SDL_ResumeAudioStreamDevice", SDL_ResumeAudioStreamDevice(stream));
+    }
+
+    // --- メインループ ----------------------------------------------------
+    var framebuffer: uint32[23040];
+    var audioBuffer: int16[1600];                    // 800 フレーム分のステレオ
+    var phase: uint = 0;
+
+    // --- 4. イベントの往復検証 ------------------------------------------
+    // 合成したキーイベントを push して poll で読み戻し、128 バイト構造体の
+    // フィールドオフセットが C 側と一致していることを Rux → C → Rux で確かめる。
+    var synthetic: SdlEvent;
+    synthetic.kind = SdlEventKeyDown;
+    synthetic.scancode = SdlScancodeSpace;
+    synthetic.down = true;
+    Check(@report, "SDL_PushEvent(synthetic key down)", SDL_PushEvent(@synthetic));
+
+    var roundTrip: SdlEvent;
+    var gotSynthetic = false;
+    SDL_PumpEvents();
+    while SDL_PollEvent(@roundTrip) {
+        if roundTrip.kind == SdlEventKeyDown && roundTrip.scancode == SdlScancodeSpace
+           && roundTrip.down {
+            gotSynthetic = true;
+        }
+    }
+    Check(@report, "SDL_PollEvent reads back scancode/down at the C offsets", gotSynthetic);
+
+    var frame: uint32 = 0;
+    var running = true;
+    var keyEvents: uint32 = 0;
+    var allEvents: uint32 = 0;
+    var updateOk = true;
+    var presentOk = true;
+    var audioOk = true;
+    var smooth = false;
+
+    let startTicks = SDL_GetTicks();
+    let startCounter = SDL_GetPerformanceCounter();
+
+    while running && frame < MaxFrames {
+        // ループ内のイベント処理経路を決定的に検証する。窓システムが実イベントを
+        // 送ってくるかは環境しだいなので、自分で 1 つ投げて確かめる。
+        if frame == 10 {
+            var injected: SdlEvent;
+            injected.kind = SdlEventKeyDown;
+            injected.scancode = SdlScancodeSpace;
+            injected.down = true;
+            SDL_PushEvent(@injected);
+        }
+
+        // --- 4. イベント ---
+        var event: SdlEvent;
+        while SDL_PollEvent(@event) {
+            allEvents += 1;
+            if event.kind == SdlEventQuit {
+                running = false;
+            } else if event.kind == SdlEventKeyDown {
+                keyEvents += 1;
+                if event.scancode == SdlScancodeEscape {
+                    running = false;
+                } else if event.scancode == SdlScancodeSpace {
+                    // --shader nearest / smooth の切り替えに相当
+                    smooth = !smooth;
+                    if smooth {
+                        SDL_SetTextureScaleMode(texture, SdlScaleModeLinear);
+                    } else {
+                        SDL_SetTextureScaleMode(texture, SdlScaleModeNearest);
+                    }
+                }
+            } else if event.kind == SdlEventKeyUp {
+                keyEvents += 1;
+            }
+        }
+
+        // --- 2. フレームバッファ転送 ---
+        RenderPattern(@framebuffer[0] as *var uint32, frame);
+        if !SDL_UpdateTexture(texture, null, @framebuffer[0] as *opaque, ScreenWidth * 4) {
+            updateOk = false;
+        }
+
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
+        SDL_RenderTexture(renderer, texture, null, null);
+
+        // --- 7. 読み戻し（1 フレームだけ）---
+        if frame == CaptureFrame {
+            let surface = SDL_RenderReadPixels(renderer, null);
+            Check(@report, "SDL_RenderReadPixels", surface != null);
+            if surface != null {
+                let path = "frame.bmp\0";
+                Check(@report, "SDL_SaveBMP(frame.bmp)", SDL_SaveBMP(surface, path.data));
+                SDL_DestroySurface(surface);
+            }
+        }
+
+        if !SDL_RenderPresent(renderer) {
+            presentOk = false;
+        }
+
+        // --- 5. 音声投入 ---
+        if stream != null {
+            FillSquareWave(@audioBuffer[0] as *var int16, 800, @phase);
+            if !SDL_PutAudioStreamData(stream, @audioBuffer[0] as *opaque, 3200) {
+                audioOk = false;
+            }
+        }
+
+        frame += 1;
+        SDL_Delay(16);
+    }
+
+    let elapsedTicks = SDL_GetTicks() - startTicks;
+    let elapsedCounter = SDL_GetPerformanceCounter() - startCounter;
+    let frequency = SDL_GetPerformanceFrequency();
+
+    Check(@report, "SDL_UpdateTexture (every frame)", updateOk);
+    Check(@report, "SDL_RenderPresent (every frame)", presentOk);
+    Check(@report, "SDL_PutAudioStreamData (every frame)", audioOk);
+    Check(@report, "SDL_GetTicks advanced", elapsedTicks > 0);
+    Check(@report, "SDL_GetPerformanceCounter advanced", elapsedCounter > 0 && frequency > 0);
+    Check(@report, "in-loop handler reacts to an injected key event",
+          keyEvents > 0 && smooth);
+
+    if stream != null {
+        PrintUIntLine("  audio bytes still queued: ", SDL_GetAudioStreamQueued(stream) as uint64);
+    }
+    PrintUIntLine("  frames rendered: ", frame as uint64);
+    PrintUIntLine("  elapsed ms: ", elapsedTicks);
+    PrintUIntLine("  events polled: ", allEvents as uint64);
+    PrintUIntLine("  key events seen: ", keyEvents as uint64);
+
+    // --- 後始末 -----------------------------------------------------------
+    if stream != null {
+        SDL_DestroyAudioStream(stream);
+    }
+    SDL_DestroyTexture(texture);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+
+    Print("passed: ");
+    PrintUInt(report.passed as uint64);
+    Print("  failed: ");
+    PrintUInt(report.failed as uint64);
+    Print("\n");
+
+    if report.failed > 0 {
+        return 1;
+    }
+    return 0;
+}

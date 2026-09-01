@@ -1,0 +1,134 @@
+// SDL3 の最小バインディング。
+// 署名はすべて /opt/homebrew/include/SDL3/*.h から採取したもので、記憶に頼っていない。
+
+import Core::{ Slice, #config };
+
+// #Link に渡した文字列は Mach-O のロードコマンドへそのまま入る。素の名前
+// （libSDL3.dylib）だと Apple Silicon の Homebrew は dyld の既定検索パスに
+// 含まれず解決できないため、ビルド時に --define SDL_PREFIX=<prefix> を渡して
+// 絶対パスを埋め込む。#Link は文字列リテラルかコンパイル時文字列定数しか
+// 受け付けない（#config.Get(...) を直接は書けない）ので、既知の prefix を
+// when で選ぶ形にしている。
+when #config.Get("SDL_PREFIX") == "/opt/homebrew" {
+    const SdlLibrary: Slice<char8> = "/opt/homebrew/lib/libSDL3.dylib";   // Homebrew (Apple Silicon)
+} else when #config.Get("SDL_PREFIX") == "/usr/local" {
+    const SdlLibrary: Slice<char8> = "/usr/local/lib/libSDL3.dylib";      // Homebrew (Intel)
+} else when #config.Get("SDL_PREFIX") == "/opt/local" {
+    const SdlLibrary: Slice<char8> = "/opt/local/lib/libSDL3.dylib";      // MacPorts
+} else {
+    const SdlLibrary: Slice<char8> = "libSDL3.dylib";                     // 既定の検索パスに任せる
+}
+
+// --- 定数 ---------------------------------------------------------------
+const SdlInitAudio: uint32 = 0x00000010;
+const SdlInitVideo: uint32 = 0x00000020;
+
+const SdlPixelFormatArgb8888: uint32 = 0x16362004;
+const SdlTextureAccessStreaming: int32 = 1;
+
+const SdlScaleModeNearest: int32 = 0;
+const SdlScaleModeLinear: int32 = 1;
+
+const SdlLogicalPresentationIntegerScale: int32 = 4;
+
+const SdlEventQuit: uint32 = 0x100;
+const SdlEventKeyDown: uint32 = 0x300;
+const SdlEventKeyUp: uint32 = 0x301;
+
+const SdlScancodeEscape: uint32 = 41;
+const SdlScancodeSpace: uint32 = 44;
+
+const SdlAudioS16Le: uint32 = 0x8010;
+
+// --- 構造体 -------------------------------------------------------------
+// Rux の構造体は宣言順・自然アライメントで配置され、フィールドの並べ替えを
+// 行わないため C の struct とレイアウト互換。よってポインタ渡しできる。
+
+struct SdlRect {
+    x: int32;
+    y: int32;
+    w: int32;
+    h: int32;
+}
+
+struct SdlFRect {
+    x: float32;
+    y: float32;
+    w: float32;
+    h: float32;
+}
+
+struct SdlAudioSpec {
+    format: uint32;
+    channels: int32;
+    freq: int32;
+}
+
+// SDL_Event は 128 バイトの union。Rux に union はあるが、ここでは最大メンバの
+// レイアウトを持つ単一構造体として宣言し、末尾を padding で 128 バイトに揃える。
+// 先頭の type を見てから該当フィールドを読む、という C 側の使い方をそのまま再現する。
+struct SdlEvent {
+    kind: uint32;       // offset 0   SDL_EventType
+    reserved: uint32;   // offset 4
+    timestamp: uint64;  // offset 8
+    windowId: uint32;   // offset 16
+    which: uint32;      // offset 20
+    scancode: uint32;   // offset 24  SDL_Scancode
+    key: uint32;        // offset 28  SDL_Keycode
+    keymod: uint16;     // offset 32
+    raw: uint16;        // offset 34
+    down: bool8;        // offset 36
+    repeat: bool8;      // offset 37
+    padding: uint8[90]; // offset 38 .. 127
+}
+
+// --- 関数 ---------------------------------------------------------------
+#Link(SdlLibrary)
+extern {
+    // SDL_init.h
+    func SDL_Init(flags: uint32) -> bool8;
+    func SDL_Quit();
+    // SDL_version.h
+    func SDL_GetVersion() -> int32;
+    // SDL_error.h
+    func SDL_GetError() -> *char8;
+    // SDL_log.h — C の可変長引数関数
+    func SDL_Log(fmt: *char8, ...);
+    // SDL_main.h
+    func SDL_SetMainReady();
+    // SDL_video.h
+    func SDL_CreateWindow(title: *char8, w: int32, h: int32, flags: uint64) -> *opaque;
+    func SDL_SetWindowTitle(window: *opaque, title: *char8) -> bool8;
+    func SDL_DestroyWindow(window: *opaque);
+    // SDL_render.h
+    func SDL_CreateRenderer(window: *opaque, name: *char8) -> *opaque;
+    func SDL_DestroyRenderer(renderer: *opaque);
+    func SDL_CreateTexture(renderer: *opaque, format: uint32, access: int32, w: int32, h: int32) -> *opaque;
+    func SDL_DestroyTexture(texture: *opaque);
+    func SDL_UpdateTexture(texture: *opaque, rect: *SdlRect, pixels: *opaque, pitch: int32) -> bool8;
+    func SDL_SetTextureScaleMode(texture: *opaque, scaleMode: int32) -> bool8;
+    func SDL_SetRenderLogicalPresentation(renderer: *opaque, w: int32, h: int32, mode: int32) -> bool8;
+    func SDL_SetRenderDrawColor(renderer: *opaque, r: uint8, g: uint8, b: uint8, a: uint8) -> bool8;
+    func SDL_RenderClear(renderer: *opaque) -> bool8;
+    func SDL_RenderTexture(renderer: *opaque, texture: *opaque, srcrect: *SdlFRect, dstrect: *SdlFRect) -> bool8;
+    func SDL_RenderPresent(renderer: *opaque) -> bool8;
+    func SDL_RenderReadPixels(renderer: *opaque, rect: *SdlRect) -> *opaque;
+    // SDL_surface.h
+    func SDL_SaveBMP(surface: *opaque, file: *char8) -> bool8;
+    func SDL_DestroySurface(surface: *opaque);
+    // SDL_events.h
+    func SDL_PollEvent(event: *var SdlEvent) -> bool8;
+    func SDL_PushEvent(event: *var SdlEvent) -> bool8;
+    func SDL_PumpEvents();
+    // SDL_audio.h
+    func SDL_OpenAudioDeviceStream(devid: uint32, spec: *SdlAudioSpec, callback: *opaque, userdata: *opaque) -> *opaque;
+    func SDL_PutAudioStreamData(stream: *opaque, buf: *opaque, len: int32) -> bool8;
+    func SDL_ResumeAudioStreamDevice(stream: *opaque) -> bool8;
+    func SDL_GetAudioStreamQueued(stream: *opaque) -> int32;
+    func SDL_DestroyAudioStream(stream: *opaque);
+    // SDL_timer.h
+    func SDL_GetTicks() -> uint64;
+    func SDL_GetPerformanceCounter() -> uint64;
+    func SDL_GetPerformanceFrequency() -> uint64;
+    func SDL_Delay(ms: uint32);
+}

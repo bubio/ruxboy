@@ -1,0 +1,6 @@
+# Rux build outputs
+Bin/
+Temp/
+
+# macOS
+.DS_Store

@@ -1,0 +1,7 @@
+# Rux build outputs
+Bin/
+Temp/
+
+# 検証実行時の出力
+frame.bmp
+frame.png

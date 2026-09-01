@@ -1,0 +1,53 @@
+import Core::Slice;
+// 標準出力ヘルパー。
+//
+// レジストリに Rux/Io が未公開のため標準ライブラリが使えず、SDL_Log は C の
+// 可変長引数関数で Rux からは正しく呼べない（後述）。そのため libSystem の
+// write(2) を直接叩く最小の出力を自前で持つ。
+
+#Link("libSystem.B.dylib")
+extern {
+    func write(fd: int32, buf: *opaque, count: uint64) -> int64;
+    func snprintf(buffer: *char8, size: uint, format: *char8, ...) -> int32;
+}
+
+func Print(text: Slice<char8>) {
+    write(1, text.data as *opaque, text.length as uint64);
+}
+
+func PrintLine(text: Slice<char8>) {
+    Print(text);
+    Print("\n");
+}
+
+// 符号なし整数を 10 進で出力する。
+func PrintUInt(value: uint64) {
+    var buf: uint8[24];
+    var i: uint = 24;
+    var n = value;
+    i -= 1;
+    buf[i] = 48 + (n % 10) as uint8;
+    n /= 10;
+    while n > 0 {
+        i -= 1;
+        buf[i] = 48 + (n % 10) as uint8;
+        n /= 10;
+    }
+    write(1, @buf[i] as *opaque, (24 - i) as uint64);
+}
+
+// "ラベル: 値" の 1 行を出力する。
+func PrintUIntLine(label: Slice<char8>, value: uint64) {
+    Print(label);
+    PrintUInt(value);
+    Print("\n");
+}
+
+// SDL のエラー文字列（NUL 終端）を出力する。
+func PrintCString(text: *char8) {
+    var n: uint64 = 0;
+    while *(text + n) != 0 as char8 {
+        n += 1;
+    }
+    write(1, text as *opaque, n);
+}
