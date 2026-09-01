@@ -1,3 +1,7 @@
 [submodule "external/Rux"]
 	path = external/Rux
 	url = https://github.com/rux-lang/Rux.git
+[submodule "docs/dev"]
+	path = docs/dev
+	url = git@github.com:bubio/dev-docs.git
+	branch = ruxboy
