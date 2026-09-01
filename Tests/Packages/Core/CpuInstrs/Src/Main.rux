@@ -1,0 +1,108 @@
+import Core::Slice;
+import GbCore::{
+    Cpu, Bus, GbMode,
+    CpuReset, BusInit, BusLoadRom, CpuStep,
+    CpuFlagZ, CpuFlagN, CpuFlagH, CpuFlagC
+};
+
+func Main() -> int {
+    var cpu: Cpu;
+    var bus: Bus;
+
+    // Test program loaded into ROM
+    // 0x0100: 3E 77       LD A, 0x77
+    // 0x0102: C6 09       ADD A, 0x09
+    // 0x0104: C6 27       ADD A, 0x27  (A becomes 0x80+0x27=0xA7, wait, let's test DAA specifically)
+    // 0x0106: 27          DAA
+    // 0x0107: CB 37       SWAP A
+    // 0x0109: C5          PUSH BC
+    // 0x010A: D1          POP DE
+    // 0x010B: 28 04       JR Z, +4
+    var rom: uint8[512];
+    var i: uint = 0;
+    while i < 512 {
+        rom[i] = 0x00; // NOP
+        i += 1;
+    }
+
+    // 0x0100: LD A, 0x77
+    rom[0x0100] = 0x3E;
+    rom[0x0101] = 0x77;
+
+    // 0x0102: ADD A, 0x09
+    rom[0x0102] = 0xC6;
+    rom[0x0103] = 0x09;
+
+    // 0x0104: LD A, 0x15
+    rom[0x0104] = 0x3E;
+    rom[0x0105] = 0x15;
+
+    // 0x0106: ADD A, 0x27
+    rom[0x0106] = 0xC6;
+    rom[0x0107] = 0x27;
+
+    // 0x0108: DAA
+    rom[0x0108] = 0x27;
+
+    // 0x0109: SWAP A
+    rom[0x0109] = 0xCB;
+    rom[0x010A] = 0x37;
+
+    // 0x010B: PUSH BC
+    rom[0x010B] = 0xC5;
+
+    // 0x010C: POP DE
+    rom[0x010C] = 0xD1;
+
+    // 0x010D: JR Z, +4
+    rom[0x010D] = 0x28;
+    rom[0x010E] = 0x04;
+
+    CpuReset(@cpu, GbMode::Dmg);
+    BusInit(@bus);
+    BusLoadRom(@bus, Slice<uint8> { data: @rom[0], length: 512 });
+
+    // Test 1: LD A, d8 (0x3E)
+    let cycles1 = CpuStep(@cpu, @bus);
+    if cpu.a != 0x77 { return 1; }
+    if cpu.pc != 0x0102 { return 2; }
+    if cycles1 != 8 { return 3; }
+
+    // Test 2: ADD A, d8 (0xC6) with carry & half-carry
+    let cycles2 = CpuStep(@cpu, @bus);
+    if cpu.a != 0x80 { return 4; } // 0x77 + 0x09 = 0x80
+    if !CpuFlagH(@cpu) { return 5; }
+    if CpuFlagC(@cpu) { return 6; }
+    if cycles2 != 8 { return 7; }
+
+    // Test 3: DAA (0x27) - BCD addition
+    // 0x15 + 0x27 = 0x3C -> DAA -> 0x42
+    CpuStep(@cpu, @bus); // LD A, 0x15
+    CpuStep(@cpu, @bus); // ADD A, 0x27
+    if cpu.a != 0x3C { return 8; }
+    CpuStep(@cpu, @bus); // DAA
+    if cpu.a != 0x42 { return 9; }
+
+    // Test 4: CB Prefix - SWAP A (0xCB 0x37)
+    // 0x42 SWAP -> 0x24
+    let cycles4 = CpuStep(@cpu, @bus);
+    if cpu.a != 0x24 { return 10; }
+    if cycles4 != 8 { return 11; }
+
+    // Test 5: PUSH BC / POP DE
+    cpu.b = 0x12;
+    cpu.c = 0x34;
+    let pushCycles = CpuStep(@cpu, @bus); // PUSH BC
+    if pushCycles != 16 { return 12; }
+    let popCycles = CpuStep(@cpu, @bus); // POP DE
+    if popCycles != 12 { return 13; }
+    if cpu.d != 0x12 || cpu.e != 0x34 { return 14; }
+
+    // Test 6: JR Z, e8 (conditional taken vs not taken)
+    // Z is false currently
+    let jrNotTaken = CpuStep(@cpu, @bus);
+    if jrNotTaken != 8 { return 15; }
+    if cpu.pc != 0x010F { return 16; }
+
+    return 0;
+}

@@ -1,0 +1,112 @@
+import Core::Slice;
+import GbCore::{ Cpu, Bus, GbMode, CpuReset, BusInit, BusPowerOn, BusLoadRom, CpuStep };
+
+#Link("libSystem.B.dylib")
+extern {
+    func write(fd: int32, buf: *opaque, count: uint) -> int64;
+    func gettimeofday(tv: *var TimeVal, tz: *opaque) -> int32;
+}
+
+struct TimeVal {
+    tv_sec: int64;
+    tv_usec: int32;
+    pad: int32;
+}
+
+const TargetTCycles: uint64 = 200000000;
+const GbcTCyclesPerSecond: uint64 = 4194304;
+
+func Print(text: Slice<char8>) {
+    write(1, text.data as *opaque, text.length);
+}
+
+func PrintLine(text: Slice<char8>) {
+    Print(text);
+    Print("\n");
+}
+
+func PrintUInt(value: uint64) {
+    var buf: uint8[24];
+    var i: uint = 24;
+    var n = value;
+    i -= 1;
+    buf[i] = 48 + (n % 10) as uint8;
+    n /= 10;
+    while n > 0 {
+        i -= 1;
+        buf[i] = 48 + (n % 10) as uint8;
+        n /= 10;
+    }
+    write(1, @buf[i] as *opaque, (24 - i));
+}
+
+func PrintUIntLine(label: Slice<char8>, value: uint64) {
+    Print(label);
+    PrintUInt(value);
+    Print("\n");
+}
+
+func NowMicros() -> uint64 {
+    var tv: TimeVal;
+    if gettimeofday(@tv, null) != 0 {
+        return 0;
+    }
+    return (tv.tv_sec as uint64) * 1000000 + (tv.tv_usec as uint64);
+}
+
+func Main() -> int {
+    var cpu: Cpu;
+    var bus: Bus;
+    CpuReset(@cpu, GbMode::Dmg);
+    BusInit(@bus);
+    BusPowerOn(@bus);
+
+    // 0x0100: NOP; JP 0x0100 のループで CPU+Bus の素のスループットを測る。
+    var rom: uint8[32768];
+    rom[0x0100] = 0x00;
+    rom[0x0101] = 0xC3;
+    rom[0x0102] = 0x00;
+    rom[0x0103] = 0x01;
+
+    if !BusLoadRom(@bus, Slice<uint8> { data: @rom[0], length: 32768u }) {
+        PrintLine("BusLoadRom failed");
+        return 1;
+    }
+
+    let start = NowMicros();
+    if start == 0 {
+        PrintLine("gettimeofday failed (start)");
+        return 2;
+    }
+
+    var steps: uint64 = 0;
+    while bus.cycles < TargetTCycles {
+        CpuStep(@cpu, @bus);
+        steps += 1;
+    }
+
+    let end = NowMicros();
+    if end <= start {
+        PrintLine("gettimeofday failed (end)");
+        return 3;
+    }
+
+    let elapsedMicros = end - start;
+    let tCyclesPerSecond = (bus.cycles * 1000000) / elapsedMicros;
+    let realtimePercent = (tCyclesPerSecond * 100) / GbcTCyclesPerSecond;
+
+    PrintLine("=== CPU throughput benchmark (Phase 1.5) ===");
+    PrintUIntLine("steps: ", steps);
+    PrintUIntLine("t-cycles: ", bus.cycles);
+    PrintUIntLine("elapsed_us: ", elapsedMicros);
+    PrintUIntLine("t-cycles_per_sec: ", tCyclesPerSecond);
+    PrintUIntLine("realtime_percent: ", realtimePercent);
+
+    if tCyclesPerSecond >= GbcTCyclesPerSecond {
+        PrintLine("result: PASS (>= 100% realtime)");
+    } else {
+        PrintLine("result: BELOW REALTIME (< 100%)");
+    }
+
+    return 0;
+}

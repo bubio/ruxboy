@@ -1,0 +1,27 @@
+// シリアル出力キャプチャ (T1-7)
+
+import Core::Slice;
+
+pub const SerialSb: uint16 = 0xFF01;
+pub const SerialSc: uint16 = 0xFF02;
+
+pub func SerialWrite(bus: *var Bus, addr: uint16, value: uint8) {
+    if addr == SerialSb {
+        bus.io[0x01] = value;
+    } else if addr == SerialSc {
+        if (value & 0x81) == 0x81 {
+            let sb = bus.io[0x01];
+            if bus.serialLogLength < SerialLogCapacity {
+                bus.serialLog[bus.serialLogLength] = sb;
+                bus.serialLogLength += 1;
+            }
+            bus.io[0x02] = value & ~0x80; // 転送完了: bit7クリア
+        } else {
+            bus.io[0x02] = value;
+        }
+    }
+}
+
+pub func SerialGetLog(bus: *Bus) -> Slice<uint8> {
+    return Slice<uint8> { data: @bus.serialLog[0], length: bus.serialLogLength };
+}

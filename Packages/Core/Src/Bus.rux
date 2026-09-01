@@ -1,0 +1,213 @@
+// メモリマップと M-cycle tick 駆動
+
+import Core::Slice;
+
+pub const OamSize: uint = 160;
+pub const VramSize: uint = 8192;
+pub const WramSize: uint = 8192;
+pub const HramSize: uint = 127;
+pub const IoSize: uint = 128;
+
+pub const RomCapacity: uint = 32768; // Phase 1: 32KiB ROM-only
+pub const SerialLogCapacity: uint = 16384;
+
+pub struct Bus {
+    pub mode: GbMode;
+    pub rom: uint8[32768];
+    pub romLength: uint;
+    pub vram: uint8[8192];
+    pub wram: uint8[8192];
+    pub oam: uint8[160];
+    pub hram: uint8[127];
+    pub io: uint8[128];
+    pub ie: uint8;
+    pub cycles: uint64;
+    pub hwCycles: uint64;
+    pub doubleSpeed: bool;
+    pub speedSwitchPrepared: bool;
+
+    // Timer (Phase 1 最小実装 / Phase 2 で正式拡張)
+    pub divCounter: uint16;
+    pub tima: uint8;
+    pub tma: uint8;
+    pub tac: uint8;
+
+    // Serial (Phase 1 T1-7)
+    pub serialLog: uint8[16384];
+    pub serialLogLength: uint;
+}
+
+pub func BusInit(bus: *var Bus) {
+    bus.mode = GbMode::Dmg;
+    bus.romLength = 0;
+    bus.ie = 0;
+    bus.cycles = 0;
+    bus.hwCycles = 0;
+    bus.doubleSpeed = false;
+    bus.speedSwitchPrepared = false;
+    bus.divCounter = 0;
+    bus.tima = 0;
+    bus.tma = 0;
+    bus.tac = 0;
+    bus.serialLogLength = 0;
+
+    var i: uint = 0;
+    while i < IoSize {
+        bus.io[i] = 0;
+        i += 1;
+    }
+}
+
+pub func BusLoadRom(bus: *var Bus, data: Slice<uint8>) -> bool {
+    if data.length == 0 || data.length > RomCapacity {
+        return false;
+    }
+    var i: uint = 0;
+    while i < data.length {
+        bus.rom[i] = data.data[i];
+        i += 1;
+    }
+    bus.romLength = data.length;
+    return true;
+}
+
+pub func BusPowerOn(bus: *var Bus) {
+    // Phase 1 では未実装レジスタの初期値設定
+}
+
+// bus_tick は t_cycles ぶん時間を進める。CPU の全メモリアクセスごとに呼ばれる。
+pub func BusTick(bus: *var Bus, tCycles: int) {
+    let cyclesU = tCycles as uint64;
+    bus.cycles += cyclesU;
+    bus.hwCycles += cyclesU;
+
+    // Timer tick (Phase 1 最小実装: instr_timing 用)
+    let oldDiv = bus.divCounter;
+    bus.divCounter = ((bus.divCounter as uint + tCycles as uint) & 0xFFFF) as uint16;
+
+    // TAC bit2 == 1 (Timer enabled)
+    if (bus.tac & 0x04) != 0 {
+        // TAC bit1-0: 00=1024 (bit9), 01=16 (bit3), 10=64 (bit5), 11=256 (bit7)
+        var bit: uint = 9;
+        let speed = bus.tac & 0x03;
+        if speed == 1 { bit = 3; }
+        else if speed == 2 { bit = 5; }
+        else if speed == 3 { bit = 7; }
+
+        let oldBit = (oldDiv >> bit) & 1;
+        let newBit = (bus.divCounter >> bit) & 1;
+        // 落下エッジ (1 -> 0)
+        if oldBit == 1 && newBit == 0 {
+            if bus.tima == 0xFF {
+                bus.tima = bus.tma;
+                // IF (0xFF0F) bit2 (Timer interrupt) をセット
+                bus.io[0x0F] = bus.io[0x0F] | 0x04;
+            } else {
+                bus.tima += 1;
+            }
+        }
+    }
+}
+
+pub func BusRead(bus: *Bus, addr: uint16) -> uint8 {
+    return BusReadRaw(bus, addr);
+}
+
+pub func BusReadRaw(bus: *Bus, addr: uint16) -> uint8 {
+    if addr <= 0x7FFF {
+        if (addr as uint) < bus.romLength {
+            return bus.rom[addr as uint];
+        }
+        return 0xFF;
+    } else if addr <= 0x9FFF {
+        return bus.vram[(addr - 0x8000) as uint];
+    } else if addr <= 0xBFFF {
+        return 0xFF; // Phase 1: 外部RAM未実装
+    } else if addr <= 0xDFFF {
+        return bus.wram[(addr - 0xC000) as uint];
+    } else if addr <= 0xFDFF {
+        return bus.wram[(addr - 0xE000) as uint]; // Echo RAM
+    } else if addr <= 0xFE9F {
+        return bus.oam[(addr - 0xFE00) as uint];
+    } else if addr <= 0xFEFF {
+        return 0xFF; // 未使用領域
+    } else if addr <= 0xFF7F {
+        return BusIoRead(bus, addr);
+    } else if addr <= 0xFFFE {
+        return bus.hram[(addr - 0xFF80) as uint];
+    } else {
+        return bus.ie; // 0xFFFF
+    }
+}
+
+pub func BusWrite(bus: *var Bus, addr: uint16, value: uint8) {
+    if addr <= 0x7FFF {
+        // ROM: 書き込み無視 (Phase 1)
+    } else if addr <= 0x9FFF {
+        bus.vram[(addr - 0x8000) as uint] = value;
+    } else if addr <= 0xBFFF {
+        // 外部RAM未実装
+    } else if addr <= 0xDFFF {
+        bus.wram[(addr - 0xC000) as uint] = value;
+    } else if addr <= 0xFDFF {
+        bus.wram[(addr - 0xE000) as uint] = value;
+    } else if addr <= 0xFE9F {
+        bus.oam[(addr - 0xFE00) as uint] = value;
+    } else if addr <= 0xFEFF {
+        // 未使用
+    } else if addr <= 0xFF7F {
+        BusIoWrite(bus, addr, value);
+    } else if addr <= 0xFFFE {
+        bus.hram[(addr - 0xFF80) as uint] = value;
+    } else {
+        bus.ie = value; // 0xFFFF
+    }
+}
+
+func BusIoRead(bus: *Bus, addr: uint16) -> uint8 {
+    if addr == 0xFF04 {
+        return (bus.divCounter >> 8) as uint8;
+    } else if addr == 0xFF05 {
+        return bus.tima;
+    } else if addr == 0xFF06 {
+        return bus.tma;
+    } else if addr == 0xFF07 {
+        return bus.tac | 0xF8;
+    } else if addr == 0xFF0F {
+        return bus.io[0x0F] | 0xE0;
+    } else if addr == 0xFF01 || addr == 0xFF02 {
+        return bus.io[(addr - 0xFF00) as uint];
+    }
+    return 0xFF;
+}
+
+func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
+    if addr == 0xFF04 {
+        bus.divCounter = 0;
+    } else if addr == 0xFF05 {
+        bus.tima = value;
+    } else if addr == 0xFF06 {
+        bus.tma = value;
+    } else if addr == 0xFF07 {
+        bus.tac = value;
+    } else if addr == 0xFF0F {
+        bus.io[0x0F] = value;
+    } else if addr == 0xFF01 {
+        bus.io[0x01] = value;
+    } else if addr == 0xFF02 {
+        SerialWrite(bus, addr, value);
+    } else {
+        bus.io[(addr - 0xFF00) as uint] = value;
+    }
+}
+
+// --- CPU 側のメモリアクセス経路 ---
+pub func CpuRead8(cpu: *Cpu, bus: *var Bus, addr: uint16) -> uint8 {
+    BusTick(bus, 4);
+    return BusRead(bus, addr);
+}
+
+pub func CpuWrite8(cpu: *Cpu, bus: *var Bus, addr: uint16, value: uint8) {
+    BusTick(bus, 4);
+    BusWrite(bus, addr, value);
+}

@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-macos:
-    name: Build (macOS)
+    name: Build & Test (macOS)
     runs-on: macos-15
 
     steps:
@@ -32,8 +32,20 @@ jobs:
         working-directory: external/Rux
         run: sh Run.sh build --compiler "$(brew --prefix llvm@22)/bin/clang++"
 
+      - name: Fetch Test ROMs
+        run: sh scripts/fetch_test_roms.sh
+
+      - name: Run Tests (Debug)
+        run: sh scripts/test.sh
+
+      - name: Run Tests (Release)
+        run: sh scripts/test.sh --release
+
       - name: Build RuxBoy (Debug)
         run: sh scripts/build_macos.sh --debug
+
+      - name: Build RuxBoy (Release)
+        run: sh scripts/build_macos.sh --release
 
       - name: Verify binary exists
         run: |
@@ -41,5 +53,5 @@ jobs:
             arm64)  arch=AArch64 ;;
             x86_64) arch=X86_64 ;;
           esac
-          bin="Packages/App/Bin/Debug/macOS/$arch/RuxBoy"
+          bin="Packages/App/Bin/Release/macOS/$arch/RuxBoy"
           test -x "$bin" && echo "OK: $bin"

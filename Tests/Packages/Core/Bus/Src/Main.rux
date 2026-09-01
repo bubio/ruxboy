@@ -1,0 +1,58 @@
+import Core::Slice;
+import GbCore::{
+    Bus, Cpu,
+    BusInit, BusLoadRom, BusRead, BusWrite, BusTick,
+    CpuRead8, CpuWrite8,
+    SerialWrite, SerialGetLog
+};
+
+func Main() -> int {
+    var bus: Bus;
+    BusInit(@bus);
+
+    // Test 1: WRAM read/write
+    BusWrite(@bus, 0xC000, 0x42);
+    if BusRead(@bus, 0xC000) != 0x42 { return 1; }
+
+    // Test 2: Echo RAM mirrors WRAM
+    if BusRead(@bus, 0xE000) != 0x42 { return 2; }
+    BusWrite(@bus, 0xE001, 0x99);
+    if BusRead(@bus, 0xC001) != 0x99 { return 3; }
+
+    // Test 3: HRAM read/write
+    BusWrite(@bus, 0xFF80, 0x12);
+    if BusRead(@bus, 0xFF80) != 0x12 { return 4; }
+
+    // Test 4: IE read/write
+    BusWrite(@bus, 0xFFFF, 0x05);
+    if BusRead(@bus, 0xFFFF) != 0x05 { return 5; }
+
+    // Test 5: BusTick advances cycles
+    BusTick(@bus, 4);
+    if bus.cycles != 4 { return 6; }
+    BusTick(@bus, 8);
+    if bus.cycles != 12 { return 7; }
+
+    // Test 6: CpuRead8 / CpuWrite8 increments cycles by 4
+    var cpu: Cpu;
+    CpuWrite8(@cpu, @bus, 0xC010, 0x55);
+    if bus.cycles != 16 { return 8; }
+    let val = CpuRead8(@cpu, @bus, 0xC010);
+    if val != 0x55 { return 9; }
+    if bus.cycles != 20 { return 10; }
+
+    // Test 7: Serial capture
+    BusWrite(@bus, 0xFF01, 0x48); // 'H'
+    BusWrite(@bus, 0xFF02, 0x81); // start
+    let log = SerialGetLog(@bus);
+    if log.length != 1 { return 11; }
+    if log.data[0] != 0x48 { return 12; }
+
+    // Test 8: ROM loading
+    var romData: uint8[4] = [0x00, 0xC3, 0x50, 0x01];
+    let loaded = BusLoadRom(@bus, Slice<uint8> { data: @romData[0], length: 4 });
+    if !loaded { return 13; }
+    if BusRead(@bus, 0x0001) != 0xC3 { return 14; }
+
+    return 0;
+}

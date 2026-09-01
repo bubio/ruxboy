@@ -3,13 +3,11 @@ Version = 1
 MinRux = "0.4.0"
 
 [Package]
-Name = "RuxBoy"
+Name = "GbCore"
 Version = "0.1.0"
-Type = "Executable"
-Description = "Game Boy Color emulator (App layer)"
+Type = "SourceLibrary"
+Description = "Game Boy Color emulation core"
 License = "MIT"
 
 [Dependencies]
 Core = { Path = "../../external/Rux/Packages/Core" }
-GbCore = { Path = "../Core" }
-Sdl3 = { Path = "../Sdl3" }

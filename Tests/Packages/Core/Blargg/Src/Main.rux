@@ -1,0 +1,158 @@
+import Core::Slice;
+import GbCore::{
+    Cpu, Bus, GbMode,
+    CpuReset, BusInit, BusPowerOn, BusLoadRom, CpuStep,
+    SerialGetLog
+};
+
+#Link("libSystem.B.dylib")
+extern {
+    func open(path: *char8, flags: int32, ...) -> int32;
+    func read(fd: int32, buf: *var opaque, count: uint) -> int64;
+    func close(fd: int32) -> int32;
+    func write(fd: int32, buf: *opaque, count: uint) -> int64;
+}
+
+func Print(text: Slice<char8>) {
+    write(1, text.data as *opaque, text.length);
+}
+
+func PrintLine(text: Slice<char8>) {
+    Print(text);
+    Print("\n");
+}
+
+func Contains(slice: Slice<uint8>, target: Slice<char8>) -> bool {
+    if target.length == 0 { return true; }
+    if slice.length < target.length { return false; }
+    var i: uint = 0;
+    while i <= slice.length - target.length {
+        var matchFound = true;
+        var j: uint = 0;
+        while j < target.length {
+            if slice.data[i + j] != (target.data[j] as uint8) {
+                matchFound = false;
+                break;
+            }
+            j += 1;
+        }
+        if matchFound { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+func RunBlarggRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool) -> bool {
+    var fd = open(path.data, 0); // O_RDONLY
+    if fd < 0 {
+        var buf: char8[256];
+        let prefix: Slice<char8> = "../../../../";
+        var p: uint = 0;
+        while p < prefix.length {
+            buf[p] = prefix.data[p];
+            p += 1;
+        }
+        var q: uint = 0;
+        while q < path.length {
+            buf[p + q] = path.data[q];
+            q += 1;
+        }
+        buf[p + q] = c8'\0';
+        fd = open(@buf[0], 0);
+    }
+
+    if fd < 0 {
+        Print("ROM not found (skipped): ");
+        PrintLine(name);
+        return true; // ROM未取得時はスキップ扱い
+    }
+
+    var romData: uint8[32768];
+    let bytesRead = read(fd, @romData[0] as *var opaque, 32768u);
+    close(fd);
+
+    if bytesRead <= 0 {
+        Print("Failed to read ROM: ");
+        PrintLine(name);
+        return false;
+    }
+
+    var cpu: Cpu;
+    var bus: Bus;
+    CpuReset(@cpu, GbMode::Dmg);
+    BusInit(@bus);
+    BusPowerOn(@bus);
+    BusLoadRom(@bus, Slice<uint8> { data: @romData[0], length: bytesRead as uint });
+
+    // タイムアウト: 120,000,000 T-cycle
+    let timeout: uint64 = 120000000;
+    var passed = false;
+    var failed = false;
+
+    while bus.cycles < timeout && !passed && !failed {
+        CpuStep(@cpu, @bus);
+
+        let log = SerialGetLog(@bus);
+        if Contains(log, "Passed") {
+            passed = true;
+        } else if Contains(log, "Failed") {
+            failed = true;
+        }
+    }
+
+    if passed {
+        if expectedPass {
+            Print("PASS: ");
+            PrintLine(name);
+            return true;
+        } else {
+            Print("UNEXPECTED PASS (remove from expected failure list): ");
+            PrintLine(name);
+            return false;
+        }
+    } else {
+        if !expectedPass {
+            Print("EXPECTED FAIL (OK for now): ");
+            PrintLine(name);
+            return true;
+        } else {
+            Print("FAIL: ");
+            PrintLine(name);
+            let log = SerialGetLog(@bus);
+            if log.length > 0 {
+                PrintLine("--- Serial Log ---");
+                write(1, log.data as *opaque, log.length);
+                PrintLine("\n------------------");
+            }
+            return false;
+        }
+    }
+}
+
+func Main() -> int {
+    PrintLine("=== Running Blargg CPU Instruction Tests ===");
+
+    var allPassed = true;
+
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/01-special.gb\0", "01-special", true) { allPassed = false; }
+    // 02-interrupts is expected to fail in Phase 1 (passes in Phase 2)
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/02-interrupts.gb\0", "02-interrupts (expected fail)", false) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/03-op sp,hl.gb\0", "03-op sp,hl", true) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/04-op r,imm.gb\0", "04-op r,imm", true) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/05-op rp.gb\0", "05-op rp", true) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/06-ld r,r.gb\0", "06-ld r,r", true) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/07-jr,jp,call,ret,rst.gb\0", "07-jr,jp,call,ret,rst", true) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/08-misc instrs.gb\0", "08-misc instrs", true) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/09-op r,r.gb\0", "09-op r,r", true) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/10-bit ops.gb\0", "10-bit ops", true) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/11-op a,(hl).gb\0", "11-op a,(hl)", true) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/instr_timing/instr_timing.gb\0", "instr_timing", true) { allPassed = false; }
+
+    if allPassed {
+        PrintLine("=== All Phase 1 Blargg Tests Passed! ===");
+        return 0;
+    } else {
+        PrintLine("=== Some Tests Failed! ===");
+        return 1;
+    }
+}

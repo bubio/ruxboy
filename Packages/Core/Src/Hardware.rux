@@ -1,0 +1,13 @@
+// Hardware 定数
+// RuxBoy の全モジュールが参照する唯一の定義源
+
+pub const ScreenWidth: int32 = 160;
+pub const ScreenHeight: int32 = 144;
+
+pub const CpuHz: uint32 = 4194304;
+pub const CyclesPerFrame: uint64 = 70224;
+
+pub enum GbMode {
+    Dmg,
+    Cgb
+}
