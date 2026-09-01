@@ -1,0 +1,129 @@
+// RuxBoy — フェーズ0: 最小ウィンドウ表示
+// SDL3 ウィンドウを開いて約 2 秒後に正常終了する。
+// Core エミュレーションはまだ存在しないため、ここでは SDL3 パッケージの動作確認を行う。
+
+import Core::{ Slice, #target };
+import Sdl3::{
+    SdlInitVideo,
+    SdlPixelFormatArgb8888, SdlTextureAccessStreaming,
+    SdlScaleModeNearest, SdlLogicalPresentationIntegerScale,
+    SdlEvent, SdlEventQuit, SdlEventKeyDown, SdlScancodeEscape,
+    SDL_SetMainReady, SDL_Init, SDL_Quit,
+    SDL_CreateWindow, SDL_DestroyWindow,
+    SDL_CreateRenderer, SDL_DestroyRenderer,
+    SDL_CreateTexture, SDL_DestroyTexture,
+    SDL_UpdateTexture, SDL_SetTextureScaleMode,
+    SDL_SetRenderLogicalPresentation, SDL_SetRenderDrawColor,
+    SDL_RenderClear, SDL_RenderTexture, SDL_RenderPresent,
+    SDL_PollEvent,
+    SDL_Delay,
+};
+
+const AppTitle: Slice<char8> = "RuxBoy\0";
+const ScreenWidth: int32 = 160;
+const ScreenHeight: int32 = 144;
+const DefaultScale: int32 = 4;
+const MaxFrames: uint32 = 120;   // 約 2 秒 @ 60fps
+
+// libSystem の write(2) で最小出力。Rux/Io は未公開のため自前で持つ。
+#Link("libSystem.B.dylib")
+extern {
+    func write(fd: int32, buf: *opaque, count: uint64) -> int64;
+}
+
+func Print(text: Slice<char8>) {
+    write(1, text.data as *opaque, text.length as uint64);
+}
+
+func PrintLine(text: Slice<char8>) {
+    Print(text);
+    Print("\n");
+}
+
+func Main() -> int {
+    PrintLine("RuxBoy v0.1.0 — phase 0 skeleton");
+
+    SDL_SetMainReady();
+
+    if !SDL_Init(SdlInitVideo) {
+        PrintLine("SDL_Init failed");
+        return 1;
+    }
+
+    let window = SDL_CreateWindow(AppTitle.data,
+                                  ScreenWidth * DefaultScale,
+                                  ScreenHeight * DefaultScale,
+                                  0);
+    if window == null {
+        PrintLine("SDL_CreateWindow failed");
+        SDL_Quit();
+        return 1;
+    }
+
+    let renderer = SDL_CreateRenderer(window, null);
+    if renderer == null {
+        PrintLine("SDL_CreateRenderer failed");
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+
+    let texture = SDL_CreateTexture(renderer,
+                                    SdlPixelFormatArgb8888,
+                                    SdlTextureAccessStreaming,
+                                    ScreenWidth,
+                                    ScreenHeight);
+    if texture == null {
+        PrintLine("SDL_CreateTexture failed");
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+
+    SDL_SetTextureScaleMode(texture, SdlScaleModeNearest);
+    SDL_SetRenderLogicalPresentation(renderer,
+                                     ScreenWidth, ScreenHeight,
+                                     SdlLogicalPresentationIntegerScale);
+
+    // フレームバッファ: 160x144 の単色（GBC グリーン風）
+    var framebuffer: uint32[23040];
+    var i: uint = 0;
+    while i < 23040 {
+        *((@framebuffer[0] as *var uint32) + i) = 0xFF9BBC0F;
+        i += 1;
+    }
+
+    var frame: uint32 = 0;
+    var running = true;
+
+    while running && frame < MaxFrames {
+        var event: SdlEvent;
+        while SDL_PollEvent(@event) {
+            if event.kind == SdlEventQuit {
+                running = false;
+            } else if event.kind == SdlEventKeyDown {
+                if event.scancode == SdlScancodeEscape {
+                    running = false;
+                }
+            }
+        }
+
+        SDL_UpdateTexture(texture, null, @framebuffer[0] as *opaque, ScreenWidth * 4);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
+        SDL_RenderTexture(renderer, texture, null, null);
+        SDL_RenderPresent(renderer);
+
+        frame += 1;
+        SDL_Delay(16);
+    }
+
+    SDL_DestroyTexture(texture);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+
+    PrintLine("done");
+    return 0;
+}

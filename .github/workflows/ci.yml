@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-macos:
+    name: Build (macOS)
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install llvm@22 cmake ninja sdl3
+
+      - name: Cache Rux compiler
+        uses: actions/cache@v4
+        id: cache-rux
+        with:
+          path: external/Rux/Bin
+          key: rux-compiler-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('external/Rux/**/*.cpp', 'external/Rux/**/*.h', 'external/Rux/Run.sh') }}
+
+      - name: Build Rux compiler
+        if: steps.cache-rux.outputs.cache-hit != 'true'
+        working-directory: external/Rux
+        run: sh Run.sh build --compiler "$(brew --prefix llvm@22)/bin/clang++"
+
+      - name: Build RuxBoy (Debug)
+        run: sh scripts/build_macos.sh --debug
+
+      - name: Verify binary exists
+        run: |
+          case "$(uname -m)" in
+            arm64)  arch=AArch64 ;;
+            x86_64) arch=X86_64 ;;
+          esac
+          bin="Packages/App/Bin/Debug/macOS/$arch/RuxBoy"
+          test -x "$bin" && echo "OK: $bin"

@@ -1,0 +1,13 @@
+[Manifest]
+Version = 1
+MinRux = "0.4.0"
+
+[Package]
+Name = "Sdl3"
+Version = "0.1.0"
+Type = "SourceLibrary"
+Description = "Minimal SDL3 bindings for RuxBoy"
+License = "MIT"
+
+[Dependencies]
+Core = { Path = "../../external/Rux/Packages/Core" }

@@ -1,6 +1,11 @@
 # Rux build outputs
 Bin/
 Temp/
+Packages/*/Bin/
+Packages/*/Temp/
 
 # macOS
 .DS_Store
+
+# グローバル gitignore で Packages/ が除外されている場合に備えて明示的に追跡する
+!Packages/
