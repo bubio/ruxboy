@@ -14,8 +14,11 @@ BLARGG_DIR="$ROMS_DIR/blargg"
 # retrio/gb-test-roms をコミット固定で取得する
 BLARGG_COMMIT="c240dd7d700e5c0b00a7bbba52b53e4ee67b5f15"
 BLARGG_BASE_URL="https://raw.githubusercontent.com/retrio/gb-test-roms/$BLARGG_COMMIT"
+MOONEYE_COMMIT="6745fe8ccc5e8035e104934dcea8c6500171b65e"
+MOONEYE_BASE_URL="https://raw.githubusercontent.com/asoderman/Mooneye-Test-Suite-ROMS/$MOONEYE_COMMIT"
 
-mkdir -p "$BLARGG_DIR/cpu_instrs/individual" "$BLARGG_DIR/instr_timing"
+mkdir -p "$BLARGG_DIR/cpu_instrs/individual" "$BLARGG_DIR/instr_timing" \
+	"$ROMS_DIR/mooneye/acceptance/timer"
 
 fetch() {
 	remote_path="$1"
@@ -55,5 +58,31 @@ fetch "cpu_instrs/cpu_instrs.gb" "$BLARGG_DIR/cpu_instrs/cpu_instrs.gb"
 
 # instr_timing（フェーズ1でパスさせる対象）
 fetch "instr_timing/instr_timing.gb" "$BLARGG_DIR/instr_timing/instr_timing.gb"
+
+fetch_mooneye() {
+	remote_path="$1"
+	local_path="$2"
+
+	if [ -f "$local_path" ]; then
+		echo "fetch_test_roms.sh: 取得済み、スキップ: $local_path"
+		return 0
+	fi
+
+	echo "fetch_test_roms.sh: 取得中: $remote_path"
+	tmp_path="$local_path.tmp"
+	if ! curl -fsSL --retry 3 --retry-delay 2 -o "$tmp_path" "$MOONEYE_BASE_URL/$remote_path"; then
+		rm -f "$tmp_path"
+		echo "fetch_test_roms.sh: 取得失敗: $remote_path" >&2
+		return 1
+	fi
+	mv "$tmp_path" "$local_path"
+}
+
+for name in div_write rapid_toggle tim00 tim00_div_trigger tim01 tim01_div_trigger \
+	tim10 tim10_div_trigger tim11 tim11_div_trigger tima_reload \
+	tima_write_reloading tma_write_reloading
+do
+	fetch_mooneye "acceptance/timer/$name.gb" "$ROMS_DIR/mooneye/acceptance/timer/$name.gb"
+done
 
 echo "fetch_test_roms.sh: 完了。配置先: $ROMS_DIR"

@@ -60,5 +60,52 @@ func Main() -> int {
     BusWrite(@bus, 0xFF04, 0xAA);
     if BusRead(@bus, 0xFF04) != 0x00 { return 16; }
 
+    // Test 10: TIMA increments on the selected divider bit falling edge
+    BusInit(@bus);
+    BusWrite(@bus, 0xFF07, 0x05); // enable, divider bit 3
+    BusTick(@bus, 16);
+    if BusRead(@bus, 0xFF05) != 0x01 { return 17; }
+
+    // Test 11: DIV reset and TAC changes can create a timer falling edge
+    bus.divCounter = 8;
+    BusWrite(@bus, 0xFF04, 0x00);
+    if BusRead(@bus, 0xFF05) != 0x02 { return 18; }
+    bus.divCounter = 8;
+    BusWrite(@bus, 0xFF07, 0x00);
+    if BusRead(@bus, 0xFF05) != 0x03 { return 19; }
+
+    // Test 12: TIMA overflow reloads TMA and requests the interrupt after 4 cycles
+    BusInit(@bus);
+    BusWrite(@bus, 0xFF05, 0xFF);
+    BusWrite(@bus, 0xFF06, 0xA5);
+    BusWrite(@bus, 0xFF07, 0x05);
+    bus.divCounter = 15;
+    BusTick(@bus, 1);
+    if BusRead(@bus, 0xFF05) != 0x00 { return 20; }
+    if (BusRead(@bus, 0xFF0F) & 0x04) != 0 { return 21; }
+    BusTick(@bus, 3);
+    if BusRead(@bus, 0xFF05) != 0x00 { return 22; }
+    BusTick(@bus, 1);
+    if BusRead(@bus, 0xFF05) != 0xA5 { return 23; }
+    if (BusRead(@bus, 0xFF0F) & 0x04) == 0 { return 24; }
+
+    // Test 13: TIMA writes cancel a pending reload; TMA writes at reload update TIMA
+    BusInit(@bus);
+    BusWrite(@bus, 0xFF05, 0xFF);
+    BusWrite(@bus, 0xFF06, 0x12);
+    BusWrite(@bus, 0xFF07, 0x05);
+    bus.divCounter = 15;
+    BusTick(@bus, 1);
+    BusWrite(@bus, 0xFF05, 0x77);
+    BusTick(@bus, 4);
+    if BusRead(@bus, 0xFF05) != 0x77 { return 25; }
+
+    BusWrite(@bus, 0xFF05, 0xFF);
+    bus.divCounter = 15;
+    BusTick(@bus, 1);
+    BusTick(@bus, 4);
+    BusWrite(@bus, 0xFF06, 0x66);
+    if BusRead(@bus, 0xFF05) != 0x66 { return 26; }
+
     return 0;
 }

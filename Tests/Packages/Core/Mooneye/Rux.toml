@@ -1,0 +1,15 @@
+[Manifest]
+Version = 1
+
+[Package]
+Name = "MooneyeTest"
+Version = "0.1.0"
+Type = "Executable"
+Description = "Mooneye timer acceptance tests"
+
+[Dependencies]
+Core = { Path = "../../../../external/Rux/Packages/Core" }
+GbCore = { Path = "../../../../Packages/Core" }
+
+[Build]
+Output = "../../../../Bin/Tests/Packages/Core"

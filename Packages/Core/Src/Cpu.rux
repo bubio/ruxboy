@@ -319,45 +319,45 @@ func InterruptPending(bus: *Bus) -> uint8 {
 }
 
 func HandleInterrupts(cpu: *var Cpu, bus: *var Bus) -> bool {
-    let pending = InterruptPending(bus);
-    if pending == 0 {
-        return false;
-    }
-    if !cpu.ime {
+    if !cpu.ime || InterruptPending(bus) == 0 {
         return false;
     }
 
-    // HALT 解除直後でも、割り込み受理時は通常命令フェッチせずベクタへ遷移する
     cpu.halted = false;
-    cpu.ime = false;
     cpu.imeDelay = 0;
 
-    var vector: uint16 = 0x40;
-    var mask: uint8 = 0x01;
+    // 受理の最初の 2 M-cycle は内部サイクル。PC 上位バイトの PUSH が
+    // IE を書き換え得るので、ベクタはその書き込み後の pending 状態から選ぶ。
+    BusTick(bus, 4);
+    BusTick(bus, 4);
+    cpu.ime = false;
+
+    let pc = cpu.pc;
+    cpu.sp -= 1;
+    CpuWrite8(cpu, bus, cpu.sp, (pc >> 8) as uint8);
+
+    let pending = InterruptPending(bus);
+    var vector: uint16 = 0;
     if (pending & 0x01) != 0 {
         vector = 0x40;
-        mask = 0x01;
+        bus.io[0x0F] = bus.io[0x0F] & ~0x01;
     } else if (pending & 0x02) != 0 {
         vector = 0x48;
-        mask = 0x02;
+        bus.io[0x0F] = bus.io[0x0F] & ~0x02;
     } else if (pending & 0x04) != 0 {
         vector = 0x50;
-        mask = 0x04;
+        bus.io[0x0F] = bus.io[0x0F] & ~0x04;
     } else if (pending & 0x08) != 0 {
         vector = 0x58;
-        mask = 0x08;
-    } else {
+        bus.io[0x0F] = bus.io[0x0F] & ~0x08;
+    } else if (pending & 0x10) != 0 {
         vector = 0x60;
-        mask = 0x10;
+        bus.io[0x0F] = bus.io[0x0F] & ~0x10;
     }
 
-    // IF の対応ビットをクリア
-    bus.io[0x0F] = bus.io[0x0F] & ~mask;
-
-    // 割り込み受理シーケンス (5 M-cycle = 20 T-cycle)
+    cpu.sp -= 1;
+    CpuWrite8(cpu, bus, cpu.sp, pc as uint8);
     BusTick(bus, 4);
-    BusTick(bus, 4);
-    Push16(cpu, bus, cpu.pc);
     cpu.pc = vector;
     return true;
 }

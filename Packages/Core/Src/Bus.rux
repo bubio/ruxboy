@@ -26,11 +26,13 @@ pub struct Bus {
     pub doubleSpeed: bool;
     pub speedSwitchPrepared: bool;
 
-    // Timer (Phase 1 最小実装 / Phase 2 で正式拡張)
+    // Timer
     pub divCounter: uint16;
     pub tima: uint8;
     pub tma: uint8;
     pub tac: uint8;
+    pub timerReloadPending: int;
+    pub timerReloadJustHappened: bool;
 
     // Serial (Phase 1 T1-7)
     pub serialLog: uint8[16384];
@@ -49,6 +51,8 @@ pub func BusInit(bus: *var Bus) {
     bus.tima = 0;
     bus.tma = 0;
     bus.tac = 0;
+    bus.timerReloadPending = 0;
+    bus.timerReloadJustHappened = false;
     bus.serialLogLength = 0;
 
     var i: uint = 0;
@@ -81,34 +85,57 @@ pub func BusTick(bus: *var Bus, tCycles: int) {
     bus.cycles += cyclesU;
     bus.hwCycles += cyclesU;
 
-    // Timer tick (Phase 1 最小実装: instr_timing 用)
-    let oldDiv = bus.divCounter;
-    bus.divCounter = ((bus.divCounter as uint + tCycles as uint) & 0xFFFF) as uint16;
+    TimerTick(bus, tCycles);
+}
 
-    // TAC bit2 == 1 (Timer enabled)
-    if (bus.tac & 0x04) != 0 {
-        // TAC bit1-0: 00=1024 (bit9), 01=16 (bit3), 10=64 (bit5), 11=256 (bit7)
-        var bit: uint = 9;
-        let speed = bus.tac & 0x03;
-        if speed == 1 { bit = 3; }
-        else if speed == 2 { bit = 5; }
-        else if speed == 3 { bit = 7; }
+func TimerSelectedBit(tac: uint8) -> uint {
+    let speed = tac & 0x03;
+    if speed == 0 { return 9; }
+    else if speed == 1 { return 3; }
+    else if speed == 2 { return 5; }
+    return 7;
+}
 
-        let oldBit = (oldDiv >> bit) & 1;
-        let newBit = (bus.divCounter >> bit) & 1;
-        // 落下エッジ (1 -> 0)
-        if oldBit == 1 && newBit == 0 {
-            if bus.tima == 0xFF {
-                bus.tima = bus.tma;
-                // IF (0xFF0F) bit2 (Timer interrupt) をセット
-                bus.io[0x0F] = bus.io[0x0F] | 0x04;
-            } else {
-                bus.tima += 1;
-            }
-        }
+func TimerSignal(divider: uint16, tac: uint8) -> bool {
+    if (tac & 0x04) == 0 { return false; }
+    return (divider & ((1 as uint16) << TimerSelectedBit(tac))) != 0;
+}
+
+func TimerIncrementTima(bus: *var Bus) {
+    if bus.timerReloadPending > 0 { return; }
+    if bus.tima == 0xFF {
+        bus.tima = 0;
+        bus.timerReloadPending = 4;
+    } else {
+        bus.tima += 1;
     }
+}
 
-    bus.io[0x0F] = bus.io[0x0F] | 0xE0;
+func TimerAdvanceReload(bus: *var Bus) {
+    if bus.timerReloadPending <= 0 { return; }
+    if bus.timerReloadPending == 1 {
+        bus.timerReloadPending = 0;
+        bus.tima = bus.tma;
+        bus.timerReloadJustHappened = true;
+        bus.io[0x0F] = bus.io[0x0F] | 0x04;
+    } else {
+        bus.timerReloadPending -= 1;
+    }
+}
+
+func TimerTick(bus: *var Bus, tCycles: int) {
+    bus.timerReloadJustHappened = false;
+    var cycle: int = 0;
+    while cycle < tCycles {
+        TimerAdvanceReload(bus);
+        let oldSignal = TimerSignal(bus.divCounter, bus.tac);
+        bus.divCounter += 1;
+        let newSignal = TimerSignal(bus.divCounter, bus.tac);
+        if oldSignal && !newSignal {
+            TimerIncrementTima(bus);
+        }
+        cycle += 1;
+    }
 }
 
 pub func BusRead(bus: *Bus, addr: uint16) -> uint8 {
@@ -185,16 +212,30 @@ func BusIoRead(bus: *Bus, addr: uint16) -> uint8 {
 
 func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
     if addr == 0xFF04 {
+        let oldSignal = TimerSignal(bus.divCounter, bus.tac);
         bus.divCounter = 0;
-        bus.io[0x04] = 0;
+        if oldSignal {
+            TimerIncrementTima(bus);
+        }
     } else if addr == 0xFF05 {
-        bus.tima = value;
+        if !bus.timerReloadJustHappened {
+            bus.timerReloadPending = 0;
+            bus.tima = value;
+        }
     } else if addr == 0xFF06 {
         bus.tma = value;
+        if bus.timerReloadJustHappened {
+            bus.tima = value;
+        }
     } else if addr == 0xFF07 {
-        bus.tac = value;
+        let oldSignal = TimerSignal(bus.divCounter, bus.tac);
+        bus.tac = value & 0x07;
+        let newSignal = TimerSignal(bus.divCounter, bus.tac);
+        if oldSignal && !newSignal {
+            TimerIncrementTima(bus);
+        }
     } else if addr == 0xFF0F {
-        bus.io[0x0F] = value | 0xE0;
+        bus.io[0x0F] = value & 0x1F;
     } else if addr == 0xFF01 {
         bus.io[0x01] = value;
     } else if addr == 0xFF02 {
