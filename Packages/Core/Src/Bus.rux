@@ -40,6 +40,13 @@ pub struct Bus {
 
     // PPU
     pub ppu: Ppu;
+
+    // OAM DMA (FF46)
+    pub dmaActive: bool;
+    pub dmaSource: uint16;
+    pub dmaIndex: int;
+    pub dmaStartDelay: int;
+    pub dmaPendingSource: uint16;
 }
 
 pub func BusInit(bus: *var Bus) {
@@ -57,6 +64,11 @@ pub func BusInit(bus: *var Bus) {
     bus.timerReloadPending = 0;
     bus.timerReloadJustHappened = false;
     bus.serialLogLength = 0;
+    bus.dmaActive = false;
+    bus.dmaSource = 0;
+    bus.dmaIndex = 0;
+    bus.dmaStartDelay = 0;
+    bus.dmaPendingSource = 0;
 
     var i: uint = 0;
     while i < IoSize {
@@ -90,6 +102,35 @@ pub func BusTick(bus: *var Bus, tCycles: int) {
 
     TimerTick(bus, tCycles);
     PpuTick(bus, tCycles);
+
+    var mCycles = tCycles / 4;
+    while mCycles > 0 {
+        DmaTickOneMcycle(bus);
+        mCycles -= 1;
+    }
+}
+
+// dma_tick_one_mcycle は OAM DMA を1 M-cycleぶん進める。
+// 開始タイミング: M0でFF46書き込み(dma_start_delay=2をセットするのみ)、M1では
+// まだ何も起きない、M2で新しい転送が開始し以後1バイト/M-cycleで160 M-cycleかけて
+// 転送する。
+func DmaTickOneMcycle(bus: *var Bus) {
+    if bus.dmaStartDelay > 0 {
+        bus.dmaStartDelay -= 1;
+        if bus.dmaStartDelay == 0 {
+            bus.dmaActive = true;
+            bus.dmaSource = bus.dmaPendingSource;
+            bus.dmaIndex = 0;
+        }
+    }
+
+    if bus.dmaActive {
+        bus.oam[bus.dmaIndex as uint] = BusReadRaw(bus, bus.dmaSource + (bus.dmaIndex as uint16));
+        bus.dmaIndex += 1;
+        if (bus.dmaIndex as uint) >= OamSize {
+            bus.dmaActive = false;
+        }
+    }
 }
 
 func TimerSelectedBit(tac: uint8) -> uint {
@@ -142,7 +183,12 @@ func TimerTick(bus: *var Bus, tCycles: int) {
     }
 }
 
+// OAM DMA 中は CPU からの OAM 領域(FE00-FE9F)読み出しが 0xFF に化ける
+// (DMA自身の内部読み出しはこの制限を受けない BusReadRaw を直接使う)。
 pub func BusRead(bus: *Bus, addr: uint16) -> uint8 {
+    if bus.dmaActive && addr >= 0xFE00 && addr <= 0xFE9F {
+        return 0xFF;
+    }
     return BusReadRaw(bus, addr);
 }
 
@@ -173,7 +219,11 @@ pub func BusReadRaw(bus: *Bus, addr: uint16) -> uint8 {
     }
 }
 
+// OAM DMA 中は OAM 領域(FE00-FE9F)自身への書き込みだけを無視する。
 pub func BusWrite(bus: *var Bus, addr: uint16, value: uint8) {
+    if bus.dmaActive && addr >= 0xFE00 && addr <= 0xFE9F {
+        return;
+    }
     if addr <= 0x7FFF {
         // ROM: 書き込み無視 (Phase 1)
     } else if addr <= 0x9FFF {
@@ -208,10 +258,10 @@ func BusIoRead(bus: *Bus, addr: uint16) -> uint8 {
         return bus.tac | 0xF8;
     } else if addr == 0xFF0F {
         return bus.io[0x0F] | 0xE0;
-    } else if addr == 0xFF01 || addr == 0xFF02 {
+    } else if addr == 0xFF01 || addr == 0xFF02 || addr == 0xFF46 {
         return bus.io[(addr - 0xFF00) as uint];
     } else if (addr >= 0xFF40 && addr <= 0xFF45) || (addr >= 0xFF47 && addr <= 0xFF4B) {
-        // FF46 (OAM DMA) は PPU レジスタではないため対象外(未実装、フェーズ3の別課題)
+        // FF46 (OAM DMA) は PPU レジスタではないため対象外
         return PpuRead(bus, addr);
     }
     return 0xFF;
@@ -247,6 +297,10 @@ func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
         bus.io[0x01] = value;
     } else if addr == 0xFF02 {
         SerialWrite(bus, addr, value);
+    } else if addr == 0xFF46 {
+        bus.io[0x46] = value; // 読み戻し用(mooneye oam_dma/reg_read)
+        bus.dmaPendingSource = (value as uint16) << 8;
+        bus.dmaStartDelay = 2; // 1 M-cycleの遅延後、2M-cycle目から新しい転送が始まる
     } else if (addr >= 0xFF40 && addr <= 0xFF45) || (addr >= 0xFF47 && addr <= 0xFF4B) {
         PpuWrite(bus, addr, value);
     } else {

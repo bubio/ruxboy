@@ -167,7 +167,7 @@ func Main() -> int {
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/intr_timing.gb\0", "intr_timing", true, "") { allPassed = false; }
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/rapid_di_ei.gb\0", "rapid_di_ei", true, "") { allPassed = false; }
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/reti_intr_timing.gb\0", "reti_intr_timing", true, "") { allPassed = false; }
-    if !RunMooneyeRom("tests/roms/mooneye/acceptance/reti_timing.gb\0", "reti_timing", false, "OAM DMA未実装") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/reti_timing.gb\0", "reti_timing", false, "known OAM DMA + RETI timing difference") { allPassed = false; }
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/interrupts/ie_push.gb\0", "ie_push", true, "") { allPassed = false; }
 
     if allPassed {
