@@ -9,13 +9,16 @@ on:
 jobs:
   build-macos:
     name: Build & Test (macOS)
-    runs-on: macos-15
+    runs-on: macos-26
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
+
+      - name: Checkout external/Rux submodule
+        run: git submodule update --init --depth 1 external/Rux
 
       - name: Install dependencies
         run: brew install llvm@22 cmake ninja sdl3
