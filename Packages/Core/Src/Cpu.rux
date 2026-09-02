@@ -521,6 +521,22 @@ pub func CpuExecute(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
     if opcode == 0x00 {
         // NOP
     }
+    // --- LD r,r'(実ゲームで最頻出の命令群のため先頭で判定する。落とし穴:
+    // 0x76=HALTはこの範囲に含まれるが、制御系ブロックで個別に扱うため
+    // ここでは除外する) ---
+    else if opcode != 0x76 && opcode >= 0x40 && opcode <= 0x7F {
+        let dst = (opcode >> 3) & 7;
+        let src = opcode & 7;
+        let v = R8Get(cpu, bus, src);
+        R8Set(cpu, bus, dst, v);
+    }
+    // --- ALU A,r(同じく高頻度) ---
+    else if opcode >= 0x80 && opcode <= 0xBF {
+        let op = (opcode >> 3) & 7;
+        let src = opcode & 7;
+        let v = R8Get(cpu, bus, src);
+        CpuAluOp(cpu, op, v);
+    }
     // --- LD r,d8 ---
     else if opcode == 0x06 || opcode == 0x0E || opcode == 0x16 || opcode == 0x1E ||
             opcode == 0x26 || opcode == 0x2E || opcode == 0x3E {
@@ -781,18 +797,8 @@ pub func CpuExecute(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
             opcode == 0xF4 || opcode == 0xFC || opcode == 0xFD {
         CpuLogIllegal(cpu, opcode);
     }
-    // --- LD r,r' / ALU A,r / ALU A,d8 ---
-    else if opcode >= 0x40 && opcode <= 0x7F {
-        let dst = (opcode >> 3) & 7;
-        let src = opcode & 7;
-        let v = R8Get(cpu, bus, src);
-        R8Set(cpu, bus, dst, v);
-    } else if opcode >= 0x80 && opcode <= 0xBF {
-        let op = (opcode >> 3) & 7;
-        let src = opcode & 7;
-        let v = R8Get(cpu, bus, src);
-        CpuAluOp(cpu, op, v);
-    } else if opcode == 0xC6 || opcode == 0xCE || opcode == 0xD6 || opcode == 0xDE ||
+    // --- ALU A,d8 ---
+    else if opcode == 0xC6 || opcode == 0xCE || opcode == 0xD6 || opcode == 0xDE ||
                opcode == 0xE6 || opcode == 0xEE || opcode == 0xF6 || opcode == 0xFE {
         let op = (opcode >> 3) & 7;
         let v = ReadImm8(cpu, bus);
