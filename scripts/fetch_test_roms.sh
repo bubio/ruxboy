@@ -18,6 +18,7 @@ MOONEYE_COMMIT="6745fe8ccc5e8035e104934dcea8c6500171b65e"
 MOONEYE_BASE_URL="https://raw.githubusercontent.com/asoderman/Mooneye-Test-Suite-ROMS/$MOONEYE_COMMIT"
 
 mkdir -p "$BLARGG_DIR/cpu_instrs/individual" "$BLARGG_DIR/instr_timing" \
+	"$BLARGG_DIR/dmg_sound/rom_singles" \
 	"$ROMS_DIR/mooneye/acceptance/timer" "$ROMS_DIR/mooneye/acceptance/interrupts" \
 	"$ROMS_DIR/mooneye/acceptance/ppu" "$ROMS_DIR/acid2"
 
@@ -59,6 +60,21 @@ fetch "cpu_instrs/cpu_instrs.gb" "$BLARGG_DIR/cpu_instrs/cpu_instrs.gb"
 
 # instr_timing（フェーズ1でパスさせる対象）
 fetch "instr_timing/instr_timing.gb" "$BLARGG_DIR/instr_timing/instr_timing.gb"
+
+# dmg_sound 個別ROM（フェーズ5でパスさせる対象。MBC1+RAM+BATTERY、cpu_instrsと
+# 同じピン留めコミットから取得するため新規ピン留めは不要）
+fetch "dmg_sound/rom_singles/01-registers.gb" "$BLARGG_DIR/dmg_sound/rom_singles/01-registers.gb"
+fetch "dmg_sound/rom_singles/02-len ctr.gb" "$BLARGG_DIR/dmg_sound/rom_singles/02-len ctr.gb"
+fetch "dmg_sound/rom_singles/03-trigger.gb" "$BLARGG_DIR/dmg_sound/rom_singles/03-trigger.gb"
+fetch "dmg_sound/rom_singles/04-sweep.gb" "$BLARGG_DIR/dmg_sound/rom_singles/04-sweep.gb"
+fetch "dmg_sound/rom_singles/05-sweep details.gb" "$BLARGG_DIR/dmg_sound/rom_singles/05-sweep details.gb"
+fetch "dmg_sound/rom_singles/06-overflow on trigger.gb" "$BLARGG_DIR/dmg_sound/rom_singles/06-overflow on trigger.gb"
+fetch "dmg_sound/rom_singles/07-len sweep period sync.gb" "$BLARGG_DIR/dmg_sound/rom_singles/07-len sweep period sync.gb"
+fetch "dmg_sound/rom_singles/08-len ctr during power.gb" "$BLARGG_DIR/dmg_sound/rom_singles/08-len ctr during power.gb"
+fetch "dmg_sound/rom_singles/09-wave read while on.gb" "$BLARGG_DIR/dmg_sound/rom_singles/09-wave read while on.gb"
+fetch "dmg_sound/rom_singles/10-wave trigger while on.gb" "$BLARGG_DIR/dmg_sound/rom_singles/10-wave trigger while on.gb"
+fetch "dmg_sound/rom_singles/11-regs after power.gb" "$BLARGG_DIR/dmg_sound/rom_singles/11-regs after power.gb"
+fetch "dmg_sound/rom_singles/12-wave write while on.gb" "$BLARGG_DIR/dmg_sound/rom_singles/12-wave write while on.gb"
 
 fetch_mooneye() {
 	remote_path="$1"

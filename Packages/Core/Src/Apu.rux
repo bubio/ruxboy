@@ -1,0 +1,1153 @@
+/// APU: 4ch(矩形波x2/波形メモリ/ノイズ) + フレームシーケンサ + 48kHz ステレオサンプル
+/// 生成。SDL3 に一切依存しない(core/app 分離、PLAN.md 1.1)。
+/// 移植元: `~/dev/_Emu/BubiBoyLite/src/core/apu.odin`(T5-1〜T5-7、T20-2の
+/// 区間平均/ナイキストフォールバックを含む最終形をそのまま移植)。
+///
+/// 整数型の方針(PLAN.md 1.2「コアの整数型は符号なしを徹底する」からの逸脱):
+/// 周期タイマー(`timer`)・エンベロープ・スイープは移植元が「0またはマイナスに
+/// 達したら」という判定(`timer <= 0`)に依存しており、符号なし整数では
+/// アンダーフローで巨大な値に化けて判定が壊れる。これらは意図的に符号付き
+/// (`int32`)を使う。SM83/PPUレジスタのような「ハードウェア上ラップアラウンド
+/// する」値ではなく内部カウンタのため対象外という判断。
+
+import Core::{ Slice, MutableSlice };
+
+// --- レジスタアドレス ---
+
+pub const Nr10Addr: uint16 = 0xFF10;
+pub const Nr11Addr: uint16 = 0xFF11;
+pub const Nr12Addr: uint16 = 0xFF12;
+pub const Nr13Addr: uint16 = 0xFF13;
+pub const Nr14Addr: uint16 = 0xFF14;
+pub const Nr21Addr: uint16 = 0xFF16;
+pub const Nr22Addr: uint16 = 0xFF17;
+pub const Nr23Addr: uint16 = 0xFF18;
+pub const Nr24Addr: uint16 = 0xFF19;
+pub const Nr30Addr: uint16 = 0xFF1A;
+pub const Nr31Addr: uint16 = 0xFF1B;
+pub const Nr32Addr: uint16 = 0xFF1C;
+pub const Nr33Addr: uint16 = 0xFF1D;
+pub const Nr34Addr: uint16 = 0xFF1E;
+pub const Nr41Addr: uint16 = 0xFF20;
+pub const Nr42Addr: uint16 = 0xFF21;
+pub const Nr43Addr: uint16 = 0xFF22;
+pub const Nr44Addr: uint16 = 0xFF23;
+pub const Nr50Addr: uint16 = 0xFF24;
+pub const Nr51Addr: uint16 = 0xFF25;
+pub const Nr52Addr: uint16 = 0xFF26;
+pub const WaveRamStart: uint16 = 0xFF30;
+pub const WaveRamEnd: uint16 = 0xFF3F;
+
+/// 512Hz = 4194304/8192 の分周に使うT-cycle周期。
+pub const FrameSequencerPeriod: int32 = 8192;
+pub const ApuMaxVolume: int32 = 15;
+/// 出力サンプルレート。
+pub const ApuSampleRate: int32 = 48000;
+/// リングバッファのステレオペア容量。あふれたら最古を破棄する。
+pub const ApuRingCapacity: uint = 8192;
+
+pub struct Envelope {
+    pub initialVolume: int32;
+    pub increase: bool;
+    pub period: int32;
+    pub timer: int32;
+    pub volume: int32;
+}
+
+pub struct Sweep {
+    pub period: int32;
+    pub negate: bool;
+    pub shift: int32;
+    pub timer: int32;
+    pub shadowFrequency: int32;
+    pub enabled: bool;
+    /// 落とし穴: negate計算後に正方向へ切替でch停止(dmg_sound "04-sweep"系)。
+    pub negateCalculatedSinceTrigger: bool;
+}
+
+pub struct PulseChannel {
+    pub enabled: bool;
+    pub dacEnabled: bool;
+    pub duty: uint8;
+    pub dutyStep: uint8;
+    pub lengthCounter: int32;
+    pub lengthEnabled: bool;
+    pub frequency: int32;
+    pub timer: int32;
+    pub envelope: Envelope;
+    /// ch2(スイープなし)では未使用(has_sweepは呼び出し側が指定)。
+    pub sweep: Sweep;
+}
+
+pub struct WaveChannel {
+    pub enabled: bool;
+    pub dacEnabled: bool;
+    pub lengthCounter: int32;
+    pub lengthEnabled: bool;
+    pub frequency: int32;
+    pub timer: int32;
+    /// 0-31(32サンプル、上位ニブル先)。
+    pub position: int32;
+    /// NR32 bit6-5 を 0/1/2/3 にデコードした値(シフト量ではない)。
+    pub outputLevel: int32;
+    /// 区間平均(ボックスフィルタ)用アキュムレータ。単位は「量子化された生の
+    /// 単位」(-15..15相当)のまま、48kHzサンプル1個ごとに平均してリセットする。
+    pub sampleArea: int32;
+    pub sampleCycles: int32;
+}
+
+pub struct NoiseChannel {
+    pub enabled: bool;
+    pub dacEnabled: bool;
+    pub lengthCounter: int32;
+    pub lengthEnabled: bool;
+    pub timer: int32;
+    /// 15bit LFSR(電源投入時 0x7FFF)。
+    pub lfsr: uint16;
+    pub envelope: Envelope;
+    pub sampleArea: int32;
+    pub sampleCycles: int32;
+}
+
+/// APU全体の状態。
+pub struct Apu {
+    pub poweredOn: bool;
+
+    /// 0-7、次にfire(未発火)のstep。
+    pub frameSequencerStep: int32;
+    pub frameSequencerCycles: int32;
+
+    pub pulse1: PulseChannel;
+    pub pulse2: PulseChannel;
+    pub wave: WaveChannel;
+    pub noise: NoiseChannel;
+
+    /// レジスタの生バイト(読み出しマスクとORして返す)。トリガービット
+    /// (NRx4 bit7)は処理後クリアして保持する。
+    pub nr10: uint8;
+    pub nr11: uint8;
+    pub nr12: uint8;
+    pub nr13: uint8;
+    pub nr14: uint8;
+    pub nr21: uint8;
+    pub nr22: uint8;
+    pub nr23: uint8;
+    pub nr24: uint8;
+    pub nr30: uint8;
+    pub nr31: uint8;
+    pub nr32: uint8;
+    pub nr33: uint8;
+    pub nr34: uint8;
+    pub nr41: uint8;
+    pub nr42: uint8;
+    pub nr43: uint8;
+    pub nr44: uint8;
+    pub nr50: uint8;
+    pub nr51: uint8;
+
+    /// FF30-FF3F。電源off中も読み書き可。
+    pub waveRam: uint8[16];
+
+    /// 48kHzダウンサンプリング用固定小数点カウンタ(CpuHz単位で蓄積)。
+    pub sampleCounter: int32;
+
+    /// リングバッファ(あふれたら最古を破棄)。ステレオはL/R別配列で持つ。
+    pub ringLeft: int16[8192];
+    pub ringRight: int16[8192];
+    pub ringRead: uint;
+    pub ringWrite: uint;
+    pub ringCount: uint;
+}
+
+func EnvelopeReset(env: *var Envelope) {
+    env.initialVolume = 0;
+    env.increase = false;
+    env.period = 0;
+    env.timer = 0;
+    env.volume = 0;
+}
+
+func SweepReset(sweep: *var Sweep) {
+    sweep.period = 0;
+    sweep.negate = false;
+    sweep.shift = 0;
+    sweep.timer = 0;
+    sweep.shadowFrequency = 0;
+    sweep.enabled = false;
+    sweep.negateCalculatedSinceTrigger = false;
+}
+
+func PulseChannelReset(ch: *var PulseChannel) {
+    ch.enabled = false;
+    ch.dacEnabled = false;
+    ch.duty = 0;
+    ch.dutyStep = 0;
+    ch.lengthCounter = 0;
+    ch.lengthEnabled = false;
+    ch.frequency = 0;
+    ch.timer = 0;
+    EnvelopeReset(@ch.envelope);
+    SweepReset(@ch.sweep);
+}
+
+func WaveChannelReset(ch: *var WaveChannel) {
+    ch.enabled = false;
+    ch.dacEnabled = false;
+    ch.lengthCounter = 0;
+    ch.lengthEnabled = false;
+    ch.frequency = 0;
+    ch.timer = 0;
+    ch.position = 0;
+    ch.outputLevel = 0;
+    ch.sampleArea = 0;
+    ch.sampleCycles = 0;
+}
+
+func NoiseChannelReset(ch: *var NoiseChannel) {
+    ch.enabled = false;
+    ch.dacEnabled = false;
+    ch.lengthCounter = 0;
+    ch.lengthEnabled = false;
+    ch.timer = 0;
+    ch.lfsr = 0;
+    EnvelopeReset(@ch.envelope);
+    ch.sampleArea = 0;
+    ch.sampleCycles = 0;
+}
+
+/// `apu` を電源offの初期状態にする(レジスタ・chすべてゼロ、リングバッファ空)。
+pub func ApuReset(apu: *var Apu) {
+    apu.poweredOn = false;
+    apu.frameSequencerStep = 0;
+    apu.frameSequencerCycles = 0;
+
+    PulseChannelReset(@apu.pulse1);
+    PulseChannelReset(@apu.pulse2);
+    WaveChannelReset(@apu.wave);
+    NoiseChannelReset(@apu.noise);
+
+    apu.nr10 = 0;
+    apu.nr11 = 0;
+    apu.nr12 = 0;
+    apu.nr13 = 0;
+    apu.nr14 = 0;
+    apu.nr21 = 0;
+    apu.nr22 = 0;
+    apu.nr23 = 0;
+    apu.nr24 = 0;
+    apu.nr30 = 0;
+    apu.nr31 = 0;
+    apu.nr32 = 0;
+    apu.nr33 = 0;
+    apu.nr34 = 0;
+    apu.nr41 = 0;
+    apu.nr42 = 0;
+    apu.nr43 = 0;
+    apu.nr44 = 0;
+    apu.nr50 = 0;
+    apu.nr51 = 0;
+
+    var i: uint = 0;
+    while i < 16 {
+        apu.waveRam[i] = 0;
+        i += 1;
+    }
+
+    apu.sampleCounter = 0;
+    apu.ringRead = 0;
+    apu.ringWrite = 0;
+    apu.ringCount = 0;
+}
+
+/// ブート完了直後の状態を直接セットする(実BIOS非対応方針、PpuPowerOnと同じ
+/// 位置づけ)。NR50/NR51 のみ Pan Docs の実測既定値を反映する。
+pub func ApuPowerOn(apu: *var Apu) {
+    apu.poweredOn = true;
+    apu.nr50 = 0x77;
+    apu.nr51 = 0xF3;
+    apu.noise.lfsr = 0x7FFF;
+}
+
+/// NR52 電源offの効果を適用する: NR10-NR51 とch状態をクリアするが、wave RAM
+/// とDMGの length カウンタ/length_enabled は保持する(dmg_sound "08-len ctr
+/// during power" / "11-regs after power" が検査)。
+func ApuPowerOff(apu: *var Apu) {
+    apu.poweredOn = false;
+
+    apu.nr10 = 0;
+    apu.nr11 = 0;
+    apu.nr12 = 0;
+    apu.nr13 = 0;
+    apu.nr14 = 0;
+    apu.nr21 = 0;
+    apu.nr22 = 0;
+    apu.nr23 = 0;
+    apu.nr24 = 0;
+    apu.nr30 = 0;
+    apu.nr31 = 0;
+    apu.nr32 = 0;
+    apu.nr33 = 0;
+    apu.nr34 = 0;
+    apu.nr41 = 0;
+    apu.nr42 = 0;
+    apu.nr43 = 0;
+    apu.nr44 = 0;
+    apu.nr50 = 0;
+    apu.nr51 = 0;
+
+    let savedLen1 = apu.pulse1.lengthCounter;
+    let savedLenEn1 = apu.pulse1.lengthEnabled;
+    let savedLen2 = apu.pulse2.lengthCounter;
+    let savedLenEn2 = apu.pulse2.lengthEnabled;
+    let savedLen3 = apu.wave.lengthCounter;
+    let savedLenEn3 = apu.wave.lengthEnabled;
+    let savedLen4 = apu.noise.lengthCounter;
+    let savedLenEn4 = apu.noise.lengthEnabled;
+
+    PulseChannelReset(@apu.pulse1);
+    PulseChannelReset(@apu.pulse2);
+    WaveChannelReset(@apu.wave);
+    NoiseChannelReset(@apu.noise);
+
+    apu.pulse1.lengthCounter = savedLen1;
+    apu.pulse1.lengthEnabled = savedLenEn1;
+    apu.pulse2.lengthCounter = savedLen2;
+    apu.pulse2.lengthEnabled = savedLenEn2;
+    apu.wave.lengthCounter = savedLen3;
+    apu.wave.lengthEnabled = savedLenEn3;
+    apu.noise.lengthCounter = savedLen4;
+    apu.noise.lengthEnabled = savedLenEn4;
+
+    apu.frameSequencerStep = 0;
+    apu.frameSequencerCycles = 0;
+}
+
+// --- フレームシーケンサのlengthクロック(step 0,2,4,6) ---
+
+func ClockLengthPulse(ch: *var PulseChannel) {
+    if ch.enabled && ch.lengthEnabled && ch.lengthCounter > 0 {
+        ch.lengthCounter -= 1;
+        if ch.lengthCounter == 0 {
+            ch.enabled = false;
+        }
+    }
+}
+
+func ClockLengthWave(ch: *var WaveChannel) {
+    if ch.enabled && ch.lengthEnabled && ch.lengthCounter > 0 {
+        ch.lengthCounter -= 1;
+        if ch.lengthCounter == 0 {
+            ch.enabled = false;
+        }
+    }
+}
+
+func ClockLengthNoise(ch: *var NoiseChannel) {
+    if ch.enabled && ch.lengthEnabled && ch.lengthCounter > 0 {
+        ch.lengthCounter -= 1;
+        if ch.lengthCounter == 0 {
+            ch.enabled = false;
+        }
+    }
+}
+
+/// ボリュームエンベロープを1ステップ進める(step 7)。
+func ClockEnvelope(env: *var Envelope) {
+    if env.period == 0 {
+        return;
+    }
+    env.timer -= 1;
+    if env.timer > 0 {
+        return;
+    }
+    env.timer = env.period;
+    var delta: int32 = -1;
+    if env.increase {
+        delta = 1;
+    }
+    let nextVolume = env.volume + delta;
+    if nextVolume >= 0 && nextVolume <= ApuMaxVolume {
+        env.volume = nextVolume;
+    }
+}
+
+/// 矩形波chの周期タイマーの再ロード値((2048-freq)*4 T-cycle)。
+func PulsePeriod(frequency: int32) -> int32 {
+    return (2048 - frequency) * 4;
+}
+
+/// スイープの周波数計算。オーバーフロー(>2047)は out param で返す(値そのものは
+/// 適用しない、呼び出し側が判断する)。negate方向を使った場合は
+/// negateCalculatedSinceTrigger を立てる。shift=0でも計算自体は行う。
+func SweepCalculate(sweep: *var Sweep, overflow: *var bool) -> int32 {
+    let delta = sweep.shadowFrequency >> sweep.shift;
+    var newFreq: int32 = 0;
+    if sweep.negate {
+        newFreq = sweep.shadowFrequency - delta;
+        sweep.negateCalculatedSinceTrigger = true;
+    } else {
+        newFreq = sweep.shadowFrequency + delta;
+    }
+    *overflow = newFreq > 2047;
+    return newFreq;
+}
+
+/// ch1 のスイープを1ステップ進める(step 2,6)。period==0/shift==0でも
+/// タイマー満了のたびオーバーフロー判定は必ず行う(周波数の実適用のみ
+/// shift!=0に限定する)。
+func SweepClock(pulse1: *var PulseChannel) {
+    if !pulse1.enabled || !pulse1.sweep.enabled {
+        return;
+    }
+    pulse1.sweep.timer -= 1;
+    if pulse1.sweep.timer > 0 {
+        return;
+    }
+    if pulse1.sweep.period == 0 {
+        pulse1.sweep.timer = 8;
+    } else {
+        pulse1.sweep.timer = pulse1.sweep.period;
+    }
+
+    var overflow = false;
+    let newFreq = SweepCalculate(@pulse1.sweep, @overflow);
+    if overflow {
+        pulse1.enabled = false;
+        return;
+    }
+    if pulse1.sweep.shift != 0 {
+        pulse1.sweep.shadowFrequency = newFreq;
+        pulse1.frequency = newFreq;
+        pulse1.timer = PulsePeriod(newFreq);
+        var overflow2 = false;
+        SweepCalculate(@pulse1.sweep, @overflow2);
+        if overflow2 {
+            pulse1.enabled = false;
+        }
+    }
+}
+
+/// NRx4トリガー(bit7=1)時の共通初期化。hasSweep=trueはch1用でスイープの
+/// shadow初期化とトリガー時オーバーフロー即時判定も行う。
+func TriggerPulse(ch: *var PulseChannel, hasSweep: bool) {
+    ch.envelope.volume = ch.envelope.initialVolume;
+    ch.envelope.timer = ch.envelope.period;
+    ch.dutyStep = 0;
+    ch.timer = PulsePeriod(ch.frequency);
+
+    if hasSweep {
+        ch.sweep.shadowFrequency = ch.frequency;
+        if ch.sweep.period == 0 {
+            ch.sweep.timer = 8;
+        } else {
+            ch.sweep.timer = ch.sweep.period;
+        }
+        ch.sweep.enabled = ch.sweep.period != 0 || ch.sweep.shift != 0;
+        ch.sweep.negateCalculatedSinceTrigger = false;
+        if ch.sweep.shift != 0 {
+            var overflow = false;
+            SweepCalculate(@ch.sweep, @overflow);
+            if overflow {
+                ch.enabled = false;
+                return;
+            }
+        }
+    }
+
+    ch.enabled = ch.dacEnabled;
+}
+
+/// NRx4 書き込み共通の length/trigger 処理(Pan Docs "Audio details" の
+/// obscure 挙動): (1) 「次のフレームシーケンサ step が length を刻まない」
+/// タイミングで length_enable を無効→有効に切り替えると、length_counter を
+/// 即座に1減らす(0になったら即ch停止、ただしこのタイミングでトリガーも
+/// されているなら停止しない)。(2) トリガー時に length_counter が0なら max に
+/// リロードするが、上と同じ条件が成立していれば max-1 にする。
+func ApplyLengthAndTrigger(lengthCounter: *var int32, lengthEnabled: *var bool, enabled: *var bool, apu: *Apu, newLengthEnabled: bool, trigger: bool, maxLength: int32) {
+    let nextStepClocksLength = (apu.frameSequencerStep % 2) == 0;
+    let wasEnabled = *lengthEnabled;
+
+    if !nextStepClocksLength && !wasEnabled && newLengthEnabled && *lengthCounter > 0 {
+        *lengthCounter = *lengthCounter - 1;
+        if *lengthCounter == 0 && !trigger {
+            *enabled = false;
+        }
+    }
+
+    *lengthEnabled = newLengthEnabled;
+
+    if trigger && *lengthCounter == 0 {
+        *lengthCounter = maxLength;
+        if !nextStepClocksLength && newLengthEnabled {
+            *lengthCounter = *lengthCounter - 1;
+        }
+    }
+}
+
+/// NR10(スイープ)への書き込み。negateから正方向へ切り替えた際、トリガー以降
+/// にnegate計算を1回でも使っていればchを即停止する。
+func WriteNr10(pulse1: *var PulseChannel, value: uint8) {
+    let oldNegate = pulse1.sweep.negate;
+    pulse1.sweep.period = ((value >> 4) & 0x07) as int32;
+    pulse1.sweep.shift = (value & 0x07) as int32;
+    let newNegate = (value & 0x08) != 0;
+    if oldNegate && !newNegate && pulse1.sweep.negateCalculatedSinceTrigger {
+        pulse1.enabled = false;
+    }
+    pulse1.sweep.negate = newNegate;
+}
+
+/// 4種のデューティ比(12.5/25/50/75%)。Pan Docs "Sound Channel 1/2" の波形表。
+func PulseDutyHigh(duty: uint8, step: uint8) -> bool {
+    if duty == 0 {
+        return step == 7;
+    } else if duty == 1 {
+        return step == 0 || step == 7;
+    } else if duty == 2 {
+        return step == 0 || step == 5 || step == 6 || step == 7;
+    }
+    return step == 1 || step == 2 || step == 3 || step == 4 || step == 5 || step == 6;
+}
+
+/// 矩形波chの現在の出力を「量子化された生の単位」(-15..15)で返す。ch無効/
+/// DAC offなら0。
+func PulseOutputUnits(ch: *PulseChannel) -> int32 {
+    if !ch.enabled || !ch.dacEnabled {
+        return 0;
+    }
+    if PulseDutyHigh(ch.duty, ch.dutyStep) {
+        return ch.envelope.volume;
+    }
+    return -ch.envelope.volume;
+}
+
+// --- ch3: 波形メモリ ---
+
+/// ch3 の周期タイマーの再ロード値((2048-freq)*2 T-cycle、矩形波chの半分。
+/// 32サンプルを1周期で再生するため)。
+func WavePeriod(frequency: int32) -> int32 {
+    return (2048 - frequency) * 2;
+}
+
+/// wave RAM の position(0-31)位置における出力を output_level(0/100/50/25%)
+/// でスケーリングした「量子化された生の単位」(-15..15)で返す。ch無効/
+/// DAC off/mute なら0。
+func WaveOutputUnitsAt(apu: *Apu, position: int32) -> int32 {
+    let ch = @apu.wave;
+    if !ch.enabled || !ch.dacEnabled || ch.outputLevel == 0 {
+        return 0;
+    }
+    let byteVal = apu.waveRam[(position / 2) as uint];
+    var nibble: uint8 = 0;
+    if (position % 2) == 0 {
+        nibble = byteVal >> 4;
+    } else {
+        nibble = byteVal & 0x0F;
+    }
+    let sample = nibble as int32;
+    var shifted: int32 = 0;
+    if ch.outputLevel == 1 {
+        shifted = sample; // 100%
+    } else if ch.outputLevel == 2 {
+        shifted = sample >> 1; // 50%
+    } else {
+        shifted = sample >> 2; // 25%
+    }
+    return 2 * shifted - 15;
+}
+
+/// ch3のNR34トリガー(bit7=1)時の初期化: 周期タイマーとposition(0番地から
+/// 再生開始)をリセットし、DAC onならch有効にする。
+func TriggerWave(apu: *var Apu) {
+    apu.wave.timer = WavePeriod(apu.wave.frequency);
+    apu.wave.position = 0;
+    apu.wave.enabled = apu.wave.dacEnabled;
+}
+
+// --- ch4: ノイズ ---
+
+/// NR43 下位3bit(divisor code)から実際の除数への変換。
+/// 0→8, 1→16, 2→32, ... n→n*16(n>=1)。
+func NoiseDivisor(code: uint8) -> int32 {
+    if code == 0 {
+        return 8;
+    } else if code == 1 {
+        return 16;
+    } else if code == 2 {
+        return 32;
+    } else if code == 3 {
+        return 48;
+    } else if code == 4 {
+        return 64;
+    } else if code == 5 {
+        return 80;
+    } else if code == 6 {
+        return 96;
+    }
+    return 112; // code == 7
+}
+
+/// NR43から周期タイマーの再ロード値を返す: divisor(下位3bit) << shift(上位4bit)。
+func NoisePeriod(nr43: uint8) -> int32 {
+    let divisor = NoiseDivisor(nr43 & 0x07);
+    let shift = (nr43 >> 4) as int32;
+    return divisor << shift;
+}
+
+/// ch4のNR44トリガー(bit7=1)時の初期化: 周期タイマー・エンベロープをリロード
+/// し、LFSRを全bit1(0x7FFF)にリセットする。
+func TriggerNoise(apu: *var Apu) {
+    apu.noise.envelope.volume = apu.noise.envelope.initialVolume;
+    apu.noise.envelope.timer = apu.noise.envelope.period;
+    apu.noise.timer = NoisePeriod(apu.nr43);
+    apu.noise.lfsr = 0x7FFF;
+    apu.noise.enabled = apu.noise.dacEnabled;
+}
+
+/// 512Hzのフレームシーケンサを1step進める。lengthはstep 0,2,4,6/
+/// エンベロープはstep 7/スイープはstep 2,6。
+func ClockFrameSequencer(apu: *var Apu) {
+    let step = apu.frameSequencerStep;
+
+    if step == 0 || step == 2 || step == 4 || step == 6 {
+        ClockLengthPulse(@apu.pulse1);
+        ClockLengthPulse(@apu.pulse2);
+        ClockLengthWave(@apu.wave);
+        ClockLengthNoise(@apu.noise);
+    }
+    if step == 2 || step == 6 {
+        SweepClock(@apu.pulse1);
+    }
+    if step == 7 {
+        ClockEnvelope(@apu.pulse1.envelope);
+        ClockEnvelope(@apu.pulse2.envelope);
+        ClockEnvelope(@apu.noise.envelope);
+    }
+
+    apu.frameSequencerStep = (step + 1) & 0x07;
+}
+
+/// DIV(0xFF04)書き込み時の副作用。内部16bitカウンタのbit12(DIVレジスタの
+/// bit4相当)が1→0に落ちる場合、フレームシーケンサが1回余分に進む(実機の
+/// DIV-APUカウンタ仕様。dmg_sound "07-len sweep period sync" が検査)。
+/// 呼び出し時点ではまだ divCounter はリセットされていない(=旧値)ことを前提。
+pub func ApuNotifyDivWrite(apu: *var Apu, oldDivCounter: uint16) {
+    if !apu.poweredOn {
+        return;
+    }
+    if (oldDivCounter & 0x1000) != 0 {
+        ClockFrameSequencer(apu);
+    }
+    apu.frameSequencerCycles = 0;
+}
+
+/// ナイキスト周波数(ApuSampleRate/2)を超えるかどうか(区間平均は「サンプリング
+/// 区間内に最低1周期分の情報がある」ことを前提にしており、超える場合は
+/// 区間平均の代わりに1周期全体の平均にフォールバックする)。
+func WaveAboveNyquist(frequency: int32) -> bool {
+    let periodCycles = WavePeriod(frequency) * 32;
+    return 2 * (4194304 as int64) >= (ApuSampleRate as int64) * (periodCycles as int64);
+}
+
+/// wave RAM の32サンプル全体を対象に平均を取った「量子化された生の単位」
+/// (-15..15相当)を返す。position/timerの現在値には依存しない。
+func WaveCycleAverageUnits(apu: *Apu) -> int32 {
+    var units: int32 = 0;
+    var position: int32 = 0;
+    while position < 32 {
+        units += WaveOutputUnitsAt(apu, position);
+        position += 1;
+    }
+    return units / 32;
+}
+
+/// t_cycles ぶんAPUを進める。bus_tick から呼ばれる。wave/noiseチャンネルは
+/// 1 T-cycle進めるたびにその瞬間の出力値をsampleArea/sampleCyclesへ蓄積し
+/// (区間平均=ボックスフィルタ)、48kHzサンプル1個を出力する瞬間にarea/cycles
+/// の平均値を使う(点サンプリングによるエイリアシングノイズ対策)。
+/// Pulseチャンネルは瞬時値のまま(区間平均を行わない)。
+///
+/// 落とし穴(性能): CPU全メモリアクセスごとに呼ばれる最も熱いパスであり、
+/// Rux Releaseパイプラインは関数インライン化を行わない(external/Rux/Docs/
+/// Architecture.mdに列挙されたRelease最適化は定数畳み込み/コピー伝播/DCE/
+/// CFG整理のみ)。当初は各chごとに小さな関数(TickPulse/TickWave/TickNoise/
+/// WaveOutputUnits/NoiseOutputUnits)へ分けていたが、1 T-cycleごとの
+/// 呼び出しオーバーヘッドで`scripts/bench_cpu.sh --release`が2061%realtime
+/// (フェーズ1.5計測)から176%realtimeまで落ち込んだため、このループの本体に
+/// 手動でインライン化した(詳細はphase-05-apu.md)。
+pub func ApuTick(apu: *var Apu, tCycles: int) {
+    var cycle: int = 0;
+    while cycle < tCycles {
+        if apu.poweredOn {
+            apu.frameSequencerCycles += 1;
+            if apu.frameSequencerCycles >= FrameSequencerPeriod {
+                apu.frameSequencerCycles -= FrameSequencerPeriod;
+                ClockFrameSequencer(apu);
+            }
+
+            // ch1(矩形波+スイープ)
+            if apu.pulse1.enabled {
+                apu.pulse1.timer -= 1;
+                if apu.pulse1.timer <= 0 {
+                    apu.pulse1.timer += PulsePeriod(apu.pulse1.frequency);
+                    apu.pulse1.dutyStep = (apu.pulse1.dutyStep + 1) & 0x07;
+                }
+            }
+            // ch2(矩形波)
+            if apu.pulse2.enabled {
+                apu.pulse2.timer -= 1;
+                if apu.pulse2.timer <= 0 {
+                    apu.pulse2.timer += PulsePeriod(apu.pulse2.frequency);
+                    apu.pulse2.dutyStep = (apu.pulse2.dutyStep + 1) & 0x07;
+                }
+            }
+
+            // ch3(波形メモリ): 区間平均用アキュムレータへの蓄積 + 周期タイマー前進
+            var waveUnit: int32 = 0;
+            if apu.wave.enabled && apu.wave.dacEnabled && apu.wave.outputLevel != 0 {
+                let byteVal = apu.waveRam[(apu.wave.position / 2) as uint];
+                var nibble: uint8 = 0;
+                if (apu.wave.position % 2) == 0 {
+                    nibble = byteVal >> 4;
+                } else {
+                    nibble = byteVal & 0x0F;
+                }
+                let sample = nibble as int32;
+                var shifted: int32 = 0;
+                if apu.wave.outputLevel == 1 {
+                    shifted = sample; // 100%
+                } else if apu.wave.outputLevel == 2 {
+                    shifted = sample >> 1; // 50%
+                } else {
+                    shifted = sample >> 2; // 25%
+                }
+                waveUnit = 2 * shifted - 15;
+            }
+            apu.wave.sampleArea += waveUnit;
+            apu.wave.sampleCycles += 1;
+            if apu.wave.enabled {
+                apu.wave.timer -= 1;
+                if apu.wave.timer <= 0 {
+                    apu.wave.timer += WavePeriod(apu.wave.frequency);
+                    apu.wave.position = (apu.wave.position + 1) & 0x1F;
+                }
+            }
+
+            // ch4(ノイズ): 区間平均用アキュムレータへの蓄積 + LFSR前進
+            var noiseUnit: int32 = 0;
+            if apu.noise.enabled && apu.noise.dacEnabled {
+                if (apu.noise.lfsr & 1) == 0 {
+                    noiseUnit = apu.noise.envelope.volume;
+                } else {
+                    noiseUnit = -apu.noise.envelope.volume;
+                }
+            }
+            apu.noise.sampleArea += noiseUnit;
+            apu.noise.sampleCycles += 1;
+            if apu.noise.enabled {
+                apu.noise.timer -= 1;
+                if apu.noise.timer <= 0 {
+                    apu.noise.timer += NoisePeriod(apu.nr43);
+                    let feedback = (apu.noise.lfsr & 1) ^ ((apu.noise.lfsr >> 1) & 1);
+                    apu.noise.lfsr = (apu.noise.lfsr >> 1) | (feedback << 14);
+                    if (apu.nr43 & 0x08) != 0 {
+                        apu.noise.lfsr = (apu.noise.lfsr & ~(0x0040 as uint16)) | (feedback << 6);
+                    }
+                }
+            }
+        }
+
+        // サンプル生成は電源off中も一定レートで続ける。無音サンプル(0)が出る
+        // だけで、オーディオ駆動ペーシングのバッファ残量ペースを崩さないため。
+        apu.sampleCounter += ApuSampleRate;
+        if apu.sampleCounter >= 4194304 {
+            apu.sampleCounter -= 4194304;
+
+            var waveUnits: int32 = 0;
+            if apu.wave.sampleCycles > 0 {
+                if WaveAboveNyquist(apu.wave.frequency) {
+                    waveUnits = WaveCycleAverageUnits(apu);
+                } else {
+                    waveUnits = apu.wave.sampleArea / apu.wave.sampleCycles;
+                }
+            }
+            apu.wave.sampleArea = 0;
+            apu.wave.sampleCycles = 0;
+
+            var noiseUnits: int32 = 0;
+            if apu.noise.sampleCycles > 0 {
+                noiseUnits = apu.noise.sampleArea / apu.noise.sampleCycles;
+            }
+            apu.noise.sampleArea = 0;
+            apu.noise.sampleCycles = 0;
+
+            var left: int16 = 0;
+            var right: int16 = 0;
+            MixSample(apu, waveUnits, noiseUnits, @left, @right);
+            PushSample(apu, left, right);
+        }
+
+        cycle += 1;
+    }
+}
+
+/// -15..15 相当の量子化単位を i16 の範囲へスケーリングする(クリッピング付き)。
+func ScaleUnitsToI16(v: int64) -> int16 {
+    if v > 32767 {
+        return 32767;
+    }
+    if v < -32768 {
+        return -32768;
+    }
+    return v as int16;
+}
+
+/// 4chをNR51パンニング・NR50マスター音量で混合し、ステレオi16サンプル1組を
+/// 返す。電源off中は無音(0,0)。waveUnits/noiseUnitsは呼び出し元(ApuTick)が
+/// 区間平均(またはナイキスト超えフォールバック)で計算済みの-15..15単位。
+/// Pulse/Noiseは瞬時値の単位をここで計算する。
+///
+/// スケーリング(浮動小数点を使わない固定小数点計算): 元の設計は
+/// 各ch出力(-1.0..1.0に正規化) * 0.25 * masterVol(1/8..1) * 32767 だが、
+/// 単位を-15..15のまま持ち回るため、分母を15*8*4=480にまとめて
+/// 最後に一度だけ除算する。
+func MixSample(apu: *Apu, waveUnits: int32, noiseUnits: int32, left: *var int16, right: *var int16) {
+    if !apu.poweredOn {
+        *left = 0;
+        *right = 0;
+        return;
+    }
+
+    let ch1 = PulseOutputUnits(@apu.pulse1);
+    let ch2 = PulseOutputUnits(@apu.pulse2);
+    let ch3 = waveUnits;
+    let ch4 = noiseUnits;
+
+    let leftVolBits = ((apu.nr50 >> 4) & 0x07) as int64;
+    let rightVolBits = (apu.nr50 & 0x07) as int64;
+
+    var leftMix: int64 = 0;
+    if (apu.nr51 & 0x10) != 0 {
+        leftMix += ch1 as int64;
+    }
+    if (apu.nr51 & 0x20) != 0 {
+        leftMix += ch2 as int64;
+    }
+    if (apu.nr51 & 0x40) != 0 {
+        leftMix += ch3 as int64;
+    }
+    if (apu.nr51 & 0x80) != 0 {
+        leftMix += ch4 as int64;
+    }
+
+    var rightMix: int64 = 0;
+    if (apu.nr51 & 0x01) != 0 {
+        rightMix += ch1 as int64;
+    }
+    if (apu.nr51 & 0x02) != 0 {
+        rightMix += ch2 as int64;
+    }
+    if (apu.nr51 & 0x04) != 0 {
+        rightMix += ch3 as int64;
+    }
+    if (apu.nr51 & 0x08) != 0 {
+        rightMix += ch4 as int64;
+    }
+
+    let leftScaled = (leftMix * (leftVolBits + 1) * 32767) / 480;
+    let rightScaled = (rightMix * (rightVolBits + 1) * 32767) / 480;
+
+    *left = ScaleUnitsToI16(leftScaled);
+    *right = ScaleUnitsToI16(rightScaled);
+}
+
+/// リングバッファへ1組追加する。満杯なら最古を1組破棄してから追加する。
+func PushSample(apu: *var Apu, left: int16, right: int16) {
+    apu.ringLeft[apu.ringWrite] = left;
+    apu.ringRight[apu.ringWrite] = right;
+    apu.ringWrite = (apu.ringWrite + 1) % ApuRingCapacity;
+    if apu.ringCount < ApuRingCapacity {
+        apu.ringCount += 1;
+    } else {
+        apu.ringRead = (apu.ringRead + 1) % ApuRingCapacity; // 満杯: 最古を破棄
+    }
+}
+
+/// リングバッファから溜まっているサンプルを dst(ステレオinterleaved i16)へ
+/// 書き出し、書き込んだ要素数(i16の個数。ペア数ではない)を返す。dst の容量が
+/// 足りなければ入りきる分だけ書き出す。
+pub func ApuDrainSamples(apu: *var Apu, dst: MutableSlice<int16>) -> uint {
+    let maxPairs = dst.length / 2;
+    var n = apu.ringCount;
+    if maxPairs < n {
+        n = maxPairs;
+    }
+    var i: uint = 0;
+    while i < n {
+        dst.data[i * 2] = apu.ringLeft[apu.ringRead];
+        dst.data[i * 2 + 1] = apu.ringRight[apu.ringRead];
+        apu.ringRead = (apu.ringRead + 1) % ApuRingCapacity;
+        i += 1;
+    }
+    apu.ringCount -= n;
+    return n * 2;
+}
+
+/// 各 NR レジスタの「未使用/書き込み専用ビットは読み出し時1になる」マスクを
+/// 返す(Pan Docs "Audio Registers" の表どおり。dmg_sound 01-registers が
+/// 最初に検査する)。NR52は専用関数(ApuStatusByte)で扱うためここには含めない。
+func ApuReadMask(addr: uint16) -> uint8 {
+    if addr == Nr10Addr {
+        return 0x80;
+    } else if addr == Nr11Addr {
+        return 0x3F;
+    } else if addr == Nr12Addr {
+        return 0x00;
+    } else if addr == Nr13Addr {
+        return 0xFF;
+    } else if addr == Nr14Addr {
+        return 0xBF;
+    } else if addr == Nr21Addr {
+        return 0x3F;
+    } else if addr == Nr22Addr {
+        return 0x00;
+    } else if addr == Nr23Addr {
+        return 0xFF;
+    } else if addr == Nr24Addr {
+        return 0xBF;
+    } else if addr == Nr30Addr {
+        return 0x7F;
+    } else if addr == Nr31Addr {
+        return 0xFF;
+    } else if addr == Nr32Addr {
+        return 0x9F;
+    } else if addr == Nr33Addr {
+        return 0xFF;
+    } else if addr == Nr34Addr {
+        return 0xBF;
+    } else if addr == Nr41Addr {
+        return 0xFF;
+    } else if addr == Nr42Addr {
+        return 0x00;
+    } else if addr == Nr43Addr {
+        return 0x00;
+    } else if addr == Nr44Addr {
+        return 0xBF;
+    } else if addr == Nr50Addr {
+        return 0x00;
+    } else if addr == Nr51Addr {
+        return 0x00;
+    }
+    return 0xFF; // FF15/FF1F(未使用アドレス)
+}
+
+/// NR52 の読み出し値(bit7=電源, bit6-4=1固定, bit3-0=各chの動作中フラグ)。
+func ApuStatusByte(apu: *Apu) -> uint8 {
+    var bits: uint8 = 0x70;
+    if !apu.poweredOn {
+        return bits;
+    }
+    bits = bits | 0x80;
+    if apu.pulse1.enabled {
+        bits = bits | 0x01;
+    }
+    if apu.pulse2.enabled {
+        bits = bits | 0x02;
+    }
+    if apu.wave.enabled {
+        bits = bits | 0x04;
+    }
+    if apu.noise.enabled {
+        bits = bits | 0x08;
+    }
+    return bits;
+}
+
+/// FF10-FF26 / FF30-FF3F への読み出しを処理する(BusIoRead から呼ぶ)。
+pub func ApuReadRegister(apu: *Apu, addr: uint16) -> uint8 {
+    if addr == Nr52Addr {
+        return ApuStatusByte(apu);
+    }
+    if addr >= WaveRamStart && addr <= WaveRamEnd {
+        return apu.waveRam[(addr - WaveRamStart) as uint]; // 電源off中も読める
+    }
+
+    var raw: uint8 = 0;
+    if addr == Nr10Addr {
+        raw = apu.nr10;
+    } else if addr == Nr11Addr {
+        raw = apu.nr11;
+    } else if addr == Nr12Addr {
+        raw = apu.nr12;
+    } else if addr == Nr13Addr {
+        raw = apu.nr13;
+    } else if addr == Nr14Addr {
+        raw = apu.nr14;
+    } else if addr == Nr21Addr {
+        raw = apu.nr21;
+    } else if addr == Nr22Addr {
+        raw = apu.nr22;
+    } else if addr == Nr23Addr {
+        raw = apu.nr23;
+    } else if addr == Nr24Addr {
+        raw = apu.nr24;
+    } else if addr == Nr30Addr {
+        raw = apu.nr30;
+    } else if addr == Nr31Addr {
+        raw = apu.nr31;
+    } else if addr == Nr32Addr {
+        raw = apu.nr32;
+    } else if addr == Nr33Addr {
+        raw = apu.nr33;
+    } else if addr == Nr34Addr {
+        raw = apu.nr34;
+    } else if addr == Nr41Addr {
+        raw = apu.nr41;
+    } else if addr == Nr42Addr {
+        raw = apu.nr42;
+    } else if addr == Nr43Addr {
+        raw = apu.nr43;
+    } else if addr == Nr44Addr {
+        raw = apu.nr44;
+    } else if addr == Nr50Addr {
+        raw = apu.nr50;
+    } else if addr == Nr51Addr {
+        raw = apu.nr51;
+    } else {
+        return 0xFF; // FF15/FF1F
+    }
+    return raw | ApuReadMask(addr);
+}
+
+/// FF10-FF26 / FF30-FF3F への書き込みを処理する(BusIoWrite から呼ぶ)。
+/// 電源off中は NR52 と wave RAM、そして DMG の例外(NRx1 の length データ)
+/// 以外の書き込みは無視される(Pan Docs footnote)。
+pub func ApuWriteRegister(apu: *var Apu, addr: uint16, value: uint8) {
+    if addr == Nr52Addr {
+        let wasOn = apu.poweredOn;
+        let isOn = (value & 0x80) != 0;
+        if wasOn && !isOn {
+            ApuPowerOff(apu);
+        } else if !wasOn && isOn {
+            apu.poweredOn = true;
+            apu.frameSequencerStep = 0;
+            apu.frameSequencerCycles = 0;
+        }
+        return;
+    }
+
+    if addr >= WaveRamStart && addr <= WaveRamEnd {
+        apu.waveRam[(addr - WaveRamStart) as uint] = value; // 電源off中も書き込み可
+        return;
+    }
+
+    let isLengthReg = addr == Nr11Addr || addr == Nr21Addr || addr == Nr31Addr || addr == Nr41Addr;
+    if !apu.poweredOn && !isLengthReg {
+        return;
+    }
+
+    if addr == Nr10Addr {
+        apu.nr10 = value;
+        WriteNr10(@apu.pulse1, value);
+    } else if addr == Nr11Addr {
+        apu.nr11 = value;
+        apu.pulse1.duty = value >> 6;
+        apu.pulse1.lengthCounter = 64 - ((value & 0x3F) as int32);
+    } else if addr == Nr12Addr {
+        apu.nr12 = value;
+        apu.pulse1.envelope.initialVolume = (value >> 4) as int32;
+        apu.pulse1.envelope.increase = (value & 0x08) != 0;
+        apu.pulse1.envelope.period = (value & 0x07) as int32;
+        apu.pulse1.dacEnabled = (value & 0xF8) != 0;
+        if !apu.pulse1.dacEnabled {
+            apu.pulse1.enabled = false;
+        }
+    } else if addr == Nr13Addr {
+        apu.nr13 = value;
+        apu.pulse1.frequency = (apu.pulse1.frequency & 0x700) | (value as int32);
+    } else if addr == Nr14Addr {
+        let trigger = (value & 0x80) != 0;
+        let newLengthEnabled = (value & 0x40) != 0;
+        apu.nr14 = value & 0x7F; // トリガービットはクリアして保持
+        apu.pulse1.frequency = (apu.pulse1.frequency & 0x0FF) | (((value & 0x07) as int32) << 8);
+        ApplyLengthAndTrigger(@apu.pulse1.lengthCounter, @apu.pulse1.lengthEnabled, @apu.pulse1.enabled, apu, newLengthEnabled, trigger, 64);
+        if trigger {
+            TriggerPulse(@apu.pulse1, true);
+        }
+    } else if addr == Nr21Addr {
+        apu.nr21 = value;
+        apu.pulse2.duty = value >> 6;
+        apu.pulse2.lengthCounter = 64 - ((value & 0x3F) as int32);
+    } else if addr == Nr22Addr {
+        apu.nr22 = value;
+        apu.pulse2.envelope.initialVolume = (value >> 4) as int32;
+        apu.pulse2.envelope.increase = (value & 0x08) != 0;
+        apu.pulse2.envelope.period = (value & 0x07) as int32;
+        apu.pulse2.dacEnabled = (value & 0xF8) != 0;
+        if !apu.pulse2.dacEnabled {
+            apu.pulse2.enabled = false;
+        }
+    } else if addr == Nr23Addr {
+        apu.nr23 = value;
+        apu.pulse2.frequency = (apu.pulse2.frequency & 0x700) | (value as int32);
+    } else if addr == Nr24Addr {
+        let trigger = (value & 0x80) != 0;
+        let newLengthEnabled = (value & 0x40) != 0;
+        apu.nr24 = value & 0x7F;
+        apu.pulse2.frequency = (apu.pulse2.frequency & 0x0FF) | (((value & 0x07) as int32) << 8);
+        ApplyLengthAndTrigger(@apu.pulse2.lengthCounter, @apu.pulse2.lengthEnabled, @apu.pulse2.enabled, apu, newLengthEnabled, trigger, 64);
+        if trigger {
+            TriggerPulse(@apu.pulse2, false);
+        }
+    } else if addr == Nr30Addr {
+        apu.nr30 = value;
+        apu.wave.dacEnabled = (value & 0x80) != 0;
+        if !apu.wave.dacEnabled {
+            apu.wave.enabled = false;
+        }
+    } else if addr == Nr31Addr {
+        apu.nr31 = value;
+        apu.wave.lengthCounter = 256 - (value as int32);
+    } else if addr == Nr32Addr {
+        apu.nr32 = value;
+        apu.wave.outputLevel = ((value >> 5) & 0x03) as int32;
+    } else if addr == Nr33Addr {
+        apu.nr33 = value;
+        apu.wave.frequency = (apu.wave.frequency & 0x700) | (value as int32);
+    } else if addr == Nr34Addr {
+        let trigger = (value & 0x80) != 0;
+        let newLengthEnabled = (value & 0x40) != 0;
+        apu.nr34 = value & 0x7F;
+        apu.wave.frequency = (apu.wave.frequency & 0x0FF) | (((value & 0x07) as int32) << 8);
+        ApplyLengthAndTrigger(@apu.wave.lengthCounter, @apu.wave.lengthEnabled, @apu.wave.enabled, apu, newLengthEnabled, trigger, 256);
+        if trigger {
+            TriggerWave(apu);
+        }
+    } else if addr == Nr41Addr {
+        apu.nr41 = value;
+        apu.noise.lengthCounter = 64 - ((value & 0x3F) as int32);
+    } else if addr == Nr42Addr {
+        apu.nr42 = value;
+        apu.noise.envelope.initialVolume = (value >> 4) as int32;
+        apu.noise.envelope.increase = (value & 0x08) != 0;
+        apu.noise.envelope.period = (value & 0x07) as int32;
+        apu.noise.dacEnabled = (value & 0xF8) != 0;
+        if !apu.noise.dacEnabled {
+            apu.noise.enabled = false;
+        }
+    } else if addr == Nr43Addr {
+        apu.nr43 = value;
+    } else if addr == Nr44Addr {
+        let trigger = (value & 0x80) != 0;
+        let newLengthEnabled = (value & 0x40) != 0;
+        apu.nr44 = value & 0x7F;
+        ApplyLengthAndTrigger(@apu.noise.lengthCounter, @apu.noise.lengthEnabled, @apu.noise.enabled, apu, newLengthEnabled, trigger, 64);
+        if trigger {
+            TriggerNoise(apu);
+        }
+    } else if addr == Nr50Addr {
+        apu.nr50 = value;
+    } else if addr == Nr51Addr {
+        apu.nr51 = value;
+    }
+}

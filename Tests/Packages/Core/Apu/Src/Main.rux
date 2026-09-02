@@ -1,0 +1,93 @@
+import Core::{ Slice, MutableSlice };
+import GbCore::{
+    Bus, BusInit, BusPowerOn, BusRead, BusWrite, BusTick,
+    ApuDrainSamples,
+    Nr10Addr, Nr11Addr, Nr12Addr, Nr13Addr, Nr14Addr,
+    Nr30Addr, Nr33Addr, Nr34Addr,
+    Nr42Addr, Nr44Addr,
+    Nr50Addr, Nr51Addr, Nr52Addr,
+    CyclesPerFrame
+};
+
+func Main() -> int {
+    var bus: Bus;
+    BusInit(@bus);
+    BusPowerOn(@bus);
+
+    // 1: 読み出しマスク(NR10 未使用ビットは1で読める)。
+    BusWrite(@bus, Nr10Addr, 0x00);
+    if BusRead(@bus, Nr10Addr) != 0x80 { return 1; }
+
+    // 2: NR52 電源on直後: bit7=1、bit6-4=1固定、ch動作中フラグは全て0。
+    if BusRead(@bus, Nr52Addr) != 0xF0 { return 2; }
+
+    // 3: ブート直後のNR50/NR51既定値。
+    if BusRead(@bus, Nr50Addr) != 0x77 { return 3; }
+    if BusRead(@bus, Nr51Addr) != 0xF3 { return 4; }
+
+    // 4: 未使用アドレス(FF15)は常に0xFFで読める。
+    if BusRead(@bus, 0xFF15) != 0xFF { return 5; }
+
+    // 5: 電源off/onでのlength counter保持とwave RAM保持。
+    BusWrite(@bus, Nr11Addr, 0x3F); // duty=0, length=64-63=1
+    if bus.apu.pulse1.lengthCounter != 1 { return 6; }
+    BusWrite(@bus, 0xFF30, 0xAB); // wave RAM 先頭バイト
+    BusWrite(@bus, Nr52Addr, 0x00); // 電源off
+    if bus.apu.pulse1.lengthCounter != 1 { return 7; } // lengthは保持
+    if BusRead(@bus, Nr11Addr) != 0x3F { return 8; } // レジスタ本体はクリア(raw=0|mask0x3F)
+    if BusRead(@bus, 0xFF30) != 0xAB { return 9; } // wave RAMは保持
+    BusWrite(@bus, Nr52Addr, 0x80); // 電源on
+
+    // 6: ch1トリガー: DAC on + 周期タイマーの再ロード値。
+    BusWrite(@bus, Nr12Addr, 0xF0); // 初期音量15, increase方向, period0, DAC on
+    BusWrite(@bus, Nr13Addr, 0x00);
+    BusWrite(@bus, Nr14Addr, 0x87); // trigger, freq高位=7 -> freq=0x700=1792
+    if !bus.apu.pulse1.enabled { return 10; }
+    if bus.apu.pulse1.timer != 1024 { return 11; } // (2048-1792)*4
+
+    // 7: DAC offで即ch停止。
+    BusWrite(@bus, Nr12Addr, 0x00);
+    if bus.apu.pulse1.enabled { return 12; }
+
+    // 8: ch3トリガー: position/enabledリセット。
+    BusWrite(@bus, Nr30Addr, 0x80); // DAC on
+    BusWrite(@bus, Nr33Addr, 0x00);
+    BusWrite(@bus, Nr34Addr, 0x87); // trigger
+    if bus.apu.wave.position != 0 { return 13; }
+    if !bus.apu.wave.enabled { return 14; }
+
+    // 9: ch4トリガー: LFSRが0x7FFFにリセットされる。
+    BusWrite(@bus, Nr42Addr, 0xF0); // DAC on
+    BusWrite(@bus, Nr44Addr, 0x80); // trigger
+    if bus.apu.noise.lfsr != 0x7FFF { return 15; }
+    if !bus.apu.noise.enabled { return 16; }
+
+    // 10: 1フレーム(70224 T-cycle)ぶん進めた後のサンプル数が理論値どおり
+    // 803ペア(70224/4194304*48000 ≈ 803.6の整数部)になる。
+    var bus2: Bus;
+    BusInit(@bus2);
+    BusPowerOn(@bus2);
+    BusTick(@bus2, CyclesPerFrame as int);
+    var sampleBuf: int16[2048];
+    let dst = MutableSlice<int16> { data: @sampleBuf[0], length: 2048 };
+    let drained = ApuDrainSamples(@bus2.apu, dst);
+    if drained != 1606 { return 17; } // 803ペア * 2
+
+    // 11: 上と同じ理論値を、CPUの実際の駆動パターン(BusTickを4 T-cycleずつ
+    // 17556回)で確認する。sampleCounterの固定小数点蓄積が呼び出しの分割
+    // 方法に依存しないことの回帰チェック。
+    var bus3: Bus;
+    BusInit(@bus3);
+    BusPowerOn(@bus3);
+    var i: uint = 0;
+    while i < 17556 {
+        BusTick(@bus3, 4);
+        i += 1;
+    }
+    var sampleBuf2: int16[2048];
+    let dst2 = MutableSlice<int16> { data: @sampleBuf2[0], length: 2048 };
+    let drained2 = ApuDrainSamples(@bus3.apu, dst2);
+    if drained2 != 1606 { return 18; }
+
+    return 0;
+}

@@ -46,6 +46,9 @@ pub struct Bus {
     // PPU
     pub ppu: Ppu;
 
+    // APU
+    pub apu: Apu;
+
     // OAM DMA (FF46)
     pub dmaActive: bool;
     pub dmaSource: uint16;
@@ -76,6 +79,7 @@ pub func BusInit(bus: *var Bus) {
     bus.dmaIndex = 0;
     bus.dmaStartDelay = 0;
     bus.dmaPendingSource = 0;
+    ApuReset(@bus.apu);
 
     var i: uint = 0;
     while i < IoSize {
@@ -96,6 +100,7 @@ pub func BusLoadRom(bus: *var Bus, data: Slice<uint8>) -> bool {
 /// 込まない方針のため)。現時点では PPU レジスタのみ。
 pub func BusPowerOn(bus: *var Bus) {
     PpuPowerOn(@bus.ppu);
+    ApuPowerOn(@bus.apu);
 }
 
 /// t_cycles ぶん時間を進める。CPU の全メモリアクセスごとに呼ばれ、
@@ -107,6 +112,7 @@ pub func BusTick(bus: *var Bus, tCycles: int) {
 
     TimerTick(bus, tCycles);
     PpuTick(bus, tCycles);
+    ApuTick(@bus.apu, tCycles); // 等速側(PLAN.md 3節: フェーズ6でダブルスピード対応時はhwCycles相当に直す)
 
     var mCycles = tCycles / 4;
     while mCycles > 0 {
@@ -277,6 +283,8 @@ func BusIoRead(bus: *Bus, addr: uint16) -> uint8 {
     } else if (addr >= 0xFF40 && addr <= 0xFF45) || (addr >= 0xFF47 && addr <= 0xFF4B) {
         // FF46 (OAM DMA) は PPU レジスタではないため対象外
         return PpuRead(bus, addr);
+    } else if (addr >= 0xFF10 && addr <= 0xFF26) || (addr >= 0xFF30 && addr <= 0xFF3F) {
+        return ApuReadRegister(@bus.apu, addr);
     }
     return 0xFF;
 }
@@ -285,6 +293,7 @@ func BusIoRead(bus: *Bus, addr: uint16) -> uint8 {
 func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
     if addr == 0xFF04 {
         let oldSignal = TimerSignal(bus.divCounter, bus.tac);
+        ApuNotifyDivWrite(@bus.apu, bus.divCounter); // divCounterをリセットする前(旧値を見る)に呼ぶ
         bus.divCounter = 0;
         if oldSignal {
             TimerIncrementTima(bus);
@@ -318,6 +327,8 @@ func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
         bus.dmaStartDelay = 2; // 1 M-cycleの遅延後、2M-cycle目から新しい転送が始まる
     } else if (addr >= 0xFF40 && addr <= 0xFF45) || (addr >= 0xFF47 && addr <= 0xFF4B) {
         PpuWrite(bus, addr, value);
+    } else if (addr >= 0xFF10 && addr <= 0xFF26) || (addr >= 0xFF30 && addr <= 0xFF3F) {
+        ApuWriteRegister(@bus.apu, addr, value);
     } else {
         bus.io[(addr - 0xFF00) as uint] = value;
     }

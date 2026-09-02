@@ -1,0 +1,15 @@
+[Manifest]
+Version = 1
+
+[Package]
+Name = "DmgSoundTest"
+Version = "0.1.0"
+Type = "Executable"
+Description = "Blargg dmg_sound test runner (APU)"
+
+[Dependencies]
+Core = { Path = "../../../../external/Rux/Packages/Core" }
+GbCore = { Path = "../../../../Packages/Core" }
+
+[Build]
+Output = "../../../../Bin/Tests/Packages/Core"
