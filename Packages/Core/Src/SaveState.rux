@@ -10,9 +10,11 @@
 /// (apu.ringLeft/ringRight/ringRead/ringWrite/ringCount、単なる出力先バッファで
 /// ゲーム状態ではない)・PPUのスキャンライン描画スクラッチ(ppu.bgColorIndex/
 /// bgCgbPalette/bgCgbPriority、`PpuRenderScanline`内で書いてすぐ読むだけで1ライン
-/// をまたいで生存しない)は保存しない。ジョイパッド(FF00)はBus.ioに生値のまま
-/// 収まっているため専用フィールドは不要(RuxBoyには現時点でJoypad.rux相当が無い。
-/// フェーズ8で入力状態を追加する場合はフォーマットバージョンを上げること)。
+/// をまたいで生存しない)は保存しない。ジョイパッド(FF00)は選択ライン
+/// (joypSelectAction/joypSelectDirection)と押下状態(joypPressed)を専用フィールドとして
+/// 保存する(移植元`~/dev/_Emu/BubiBoyLite/src/core/savestate.odin`もJOYPAD_STATE_SIZE
+/// として同じ3フィールドを保存しており、それに倣った。フェーズ8でBus.rux側に追加した
+/// ためフォーマットバージョンを1→2に上げてある)。
 ///
 /// 設計: BubiBoy Lite の Odin 版は Mbc状態をtagged unionで持つため種別ごとに本体
 /// サイズが変わったが、RuxBoy の`Mbc`は種別を問わず全フィールドを持つフラット
@@ -31,7 +33,7 @@ pub const SaveStateMagic0: uint8 = 0x52; // 'R'
 pub const SaveStateMagic1: uint8 = 0x58; // 'X'
 pub const SaveStateMagic2: uint8 = 0x42; // 'B'
 pub const SaveStateMagic3: uint8 = 0x53; // 'S'
-pub const SaveStateFormatVersion: uint32 = 1;
+pub const SaveStateFormatVersion: uint32 = 2; // v2: ジョイパッド状態(joypSelectAction/joypSelectDirection/joypPressed)を追加
 pub const SaveStateHeaderSize: uint = 4 + 4 + 2; // マジック + バージョン + ROMチェックサム
 
 pub enum SaveStateError {
@@ -168,6 +170,7 @@ const ApuNrRegsSize: uint = 20; // nr10-nr14,nr21-nr24,nr30-nr34,nr41-nr44,nr50,
 const ApuStateSize: uint = 1 /*poweredOn*/ + 4 /*frameSequencerStep*/ + 4 /*frameSequencerCycles*/ + PulseChannelSize * 2 + WaveChannelSize + NoiseChannelSize + ApuNrRegsSize + 16 /*waveRam*/ + 4 /*sampleCounter*/;
 
 const BusScalarSize: uint = 1 /*mode*/ + 1 /*vramBank*/ + 1 /*wramBank*/ + 8 /*cycles*/ + 8 /*hwCycles*/ + 1 /*doubleSpeed*/ + 1 /*speedSwitchPrepared*/ + 1 /*bcps*/ + 1 /*ocps*/;
+const JoypadStateSize: uint = 1 /*joypSelectAction*/ + 1 /*joypSelectDirection*/ + 1 /*joypPressed*/;
 const BusLargeArraysSize: uint = 16384 /*vram*/ + 32768 /*wram*/ + 160 /*oam*/ + 127 /*hram*/ + 128 /*io*/ + 1 /*ie*/ + 64 /*bgPaletteRam*/ + 64 /*objPaletteRam*/;
 
 // Mbc(Mbc.rux参照)は種別を問わず全フィールドを持つフラット構造体のため、
@@ -181,7 +184,7 @@ const MbcStateSize: uint = 1 /*kind*/ + 1 /*ramEnabled*/ + 1 /*romBankLow5*/ + 1
 /// 「現在の状態を壊さない」設計参照)。
 pub func SaveStateExpectedSize(bus: *Bus) -> uint {
     return SaveStateHeaderSize + CpuStateSize + BusScalarSize + BusLargeArraysSize +
-        HdmaStateSize + TimerStateSize + PpuStateSize + ApuStateSize + MbcStateSize +
+        JoypadStateSize + HdmaStateSize + TimerStateSize + PpuStateSize + ApuStateSize + MbcStateSize +
         bus.cart.ramLength;
 }
 
@@ -540,6 +543,10 @@ func WriteBusState(c: *var WriteCursor, bus: *Bus) {
     PutBool(c, bus.hdmaAborted);
     PutIntAsI32(c, bus.hdmaAbortedRemaining);
 
+    PutBool(c, bus.joypSelectAction);
+    PutBool(c, bus.joypSelectDirection);
+    PutU8(c, bus.joypPressed);
+
     WriteTimerState(c, bus);
     WritePpuState(c, @bus.ppu);
     WriteApuState(c, @bus.apu);
@@ -573,6 +580,10 @@ func ReadBusState(c: *var ReadCursor, bus: *var Bus) {
     bus.hdmaActive = GetBool(c);
     bus.hdmaAborted = GetBool(c);
     bus.hdmaAbortedRemaining = GetIntAsI32(c);
+
+    bus.joypSelectAction = GetBool(c);
+    bus.joypSelectDirection = GetBool(c);
+    bus.joypPressed = GetU8(c);
 
     ReadTimerState(c, bus);
     ReadPpuState(c, @bus.ppu);

@@ -1,0 +1,140 @@
+/// POSIX(libc)への最小限のバインディング。ファイルI/O・argv・環境変数の取得に使う。
+///
+/// Rux標準ライブラリの `Storage`/`Path` パッケージはより高機能だが、`Allocator`/`OsString`
+/// などの抽象を新たに導入するコストがフェーズ8のスコープに見合わないと判断し、既存の
+/// `Packages/App/Src/Main.rux`(フェーズ0)や `Tests/Packages/Core/Blargg`
+/// (`open`/`read`/`close`を自前で宣言)と同じ「必要最小限を自前で持つ」方針を踏襲した。
+/// 署名は `man 2 <name>` および `/usr/include` のヘッダに基づく(macOS専用、フェーズ9で
+/// Linux/Windows対応時に再検証が必要)。
+
+import Core::Slice;
+
+#Link("libSystem.B.dylib")
+extern {
+    func open(path: *char8, flags: int32, ...) -> int32;
+    func close(fd: int32) -> int32;
+    func read(fd: int32, buf: *var opaque, count: uint) -> int64;
+    func write(fd: int32, buf: *opaque, count: uint) -> int64;
+    func lseek(fd: int32, offset: int64, whence: int32) -> int64;
+    func unlink(path: *char8) -> int32;
+    func rename(oldPath: *char8, newPath: *char8) -> int32;
+    func mkdir(path: *char8, mode: uint16) -> int32;
+    func access(path: *char8, mode: int32) -> int32;
+    func getenv(name: *char8) -> *char8;
+    func malloc(size: uint) -> *var opaque;
+    func calloc(count: uint, size: uint) -> *var opaque;
+    func free(ptr: *var opaque);
+    func _NSGetArgc() -> *var int32;
+    func _NSGetArgv() -> *var *var *var char8;
+    func time(t: *var int64) -> int64;
+}
+
+pub const ORdOnly: int32 = 0x0000;
+pub const OWrOnly: int32 = 0x0001;
+pub const OCreat: int32 = 0x0200;
+pub const OTrunc: int32 = 0x0400;
+pub const SeekSet: int32 = 0;
+pub const SeekEnd: int32 = 2;
+pub const FOk: int32 = 0;
+
+/// null終端の`*char8`をバイト長を数えて`Slice<char8>`にする(終端は含まない)。
+pub func CStrToSlice(s: *char8) -> Slice<char8> {
+    var len: uint = 0;
+    while *(s + len) != 0 {
+        len += 1;
+    }
+    return Slice<char8> { data: s, length: len };
+}
+
+pub func PathExists(path: *char8) -> bool {
+    return access(path, FOk) == 0;
+}
+
+/// `path`を丸ごと読み込む。`length`に読み込んだバイト数を書く。所有権は呼び出し側に移る
+/// (`free`すること)。失敗時は null を返す。
+pub func ReadEntireFile(path: *char8, length: *var uint) -> *var uint8 {
+    let fd = open(path, ORdOnly);
+    if fd < 0 {
+        *length = 0;
+        return null;
+    }
+    let size = lseek(fd, 0, SeekEnd);
+    if size < 0 {
+        close(fd);
+        *length = 0;
+        return null;
+    }
+    lseek(fd, 0, SeekSet);
+
+    let buf = calloc((size as uint) + 1, 1) as *var uint8;
+    if buf == null {
+        close(fd);
+        *length = 0;
+        return null;
+    }
+
+    var total: int64 = 0;
+    while total < size {
+        let n = read(fd, (buf + (total as uint)) as *var opaque, (size - total) as uint);
+        if n <= 0 { break; }
+        total += n;
+    }
+    close(fd);
+    *length = total as uint;
+    return buf;
+}
+
+/// `data`を`path`へ書き込む(単純上書き。存在しなければ作成)。
+func WriteFileRaw(path: *char8, data: *uint8, length: uint) -> bool {
+    let fd = open(path, OWrOnly | OCreat | OTrunc, 0x1A4 as int32); // 0644
+    if fd < 0 { return false; }
+    var total: uint = 0;
+    var ok = true;
+    while total < length {
+        let n = write(fd, (data + total) as *opaque, length - total);
+        if n <= 0 { ok = false; break; }
+        total += n as uint;
+    }
+    close(fd);
+    return ok;
+}
+
+/// アトミック書き込み: 一時ファイル(`path`+".tmp")に書いてから`path`へリネームする
+/// (書き込み中のクラッシュで既存ファイルを壊さない、
+/// `~/dev/_Emu/BubiBoyLite/src/app/saveram.odin`の`save_ram_write_atomic`と同じ方式。
+/// バックアップ(.bak)への退避は行わない — renameが同一ファイルシステム上でアトミックである
+/// ことに依拠し、「一時ファイル書き込み失敗時に既存ファイルへ影響しない」という核心の保証は
+/// 変わらないため、フェーズ8のスコープでは簡略化した)。
+pub func WriteFileAtomic(path: *char8, tmpPath: *char8, data: *uint8, length: uint) -> bool {
+    if !WriteFileRaw(tmpPath, data, length) {
+        return false;
+    }
+    if rename(tmpPath, path) != 0 {
+        unlink(tmpPath);
+        return false;
+    }
+    return true;
+}
+
+/// argv(先頭のプログラム名を含む)を返す。
+pub func Argv(argc: *var int32) -> *var *var char8 {
+    *argc = *_NSGetArgc();
+    return *_NSGetArgv();
+}
+
+pub func GetEnv(name: *char8) -> *char8 {
+    return getenv(name);
+}
+
+/// 現在時刻をUNIX秒で返す(`MbcSyncWallClock`へ供給する。coreは時計を直接読まない方針
+/// のため、壁時計の取得はapp側の責務 — `~/dev/_Emu/BubiBoyLite/src/app/saveram.odin`の
+/// `wall_clock_now`と同じ位置づけ)。
+pub func WallClockNow() -> int64 {
+    return time(null);
+}
+
+/// ディレクトリを作成する(既存なら成功扱い)。深さ1つ(親は既存前提)のみ対応。
+pub func EnsureDirectory(path: *char8) -> bool {
+    if PathExists(path) { return true; }
+    return mkdir(path, 0x1ED as uint16) == 0; // 0755
+}

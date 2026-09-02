@@ -20,7 +20,8 @@ import Core::{ Slice, MutableSlice };
 import GbCore::{
     Cpu, Bus, GbMode, CyclesPerFrame,
     CpuReset, BusInit, BusPowerOn, BusLoadRom, BusWrite, CpuStep,
-    SaveStateError, SaveStateWrite, SaveStateRead, SaveStateExpectedSize
+    SaveStateError, SaveStateWrite, SaveStateRead, SaveStateExpectedSize,
+    JoypadSetButton, JoypadUp, JoypadA
 };
 
 #Link("libSystem.B.dylib")
@@ -155,6 +156,15 @@ func Main() -> int {
     BusWrite(@bus, 0xFF22, 0x76); // NR43
     BusWrite(@bus, 0xFF23, 0xC0); // NR44: トリガー + 長さ有効
 
+    // ジョイパッド(v2で追加)にも意味のある内部状態を作っておく。素の実行だけでは
+    // FF00へ触らないため既定値(0)のままになり、フィールドを丸ごと保存し忘れても
+    // このテストでは気づけない(T7-2「復元後に発散するか」方式は、cpu_instrsが
+    // FF00を読み書きしないぶんジョイパッドには効かない)。よってここだけは
+    // 復元直後に直接フィールド比較で検証する(下記T8-2参照)。
+    BusWrite(@bus, 0xFF00, 0x20); // 方向キー選択(bit4=0)、アクション非選択
+    JoypadSetButton(@bus, JoypadUp, true); // 選択中グループのボタンを押す
+    JoypadSetButton(@bus, JoypadA, true); // 非選択グループのボタンも押しておく(joypPressedの保存漏れ検出用)
+
     // --- チェックポイントを保存 ---
     let saveSize = SaveStateWrite(@cpu, @bus, scratch);
     var saveBuf: uint8[300000];
@@ -208,6 +218,21 @@ func Main() -> int {
         PrintLine("FAIL: SaveStateRead did not clear APU ring buffer indices");
         return 1;
     }
+
+    // T8-2: ジョイパッド状態(v2で追加)が復元されたことを直接確認する。
+    if bus2.joypSelectAction != bus.joypSelectAction {
+        PrintLine("FAIL: joypSelectAction was not restored");
+        return 1;
+    }
+    if bus2.joypSelectDirection != bus.joypSelectDirection {
+        PrintLine("FAIL: joypSelectDirection was not restored");
+        return 1;
+    }
+    if bus2.joypPressed != bus.joypPressed {
+        PrintLine("FAIL: joypPressed was not restored");
+        return 1;
+    }
+    PrintLine("PASS: joypad state (select lines + pressed mask) round-trips");
 
     let targetCyclesRestored = bus2.cycles + runCycles;
     while bus2.cycles < targetCyclesRestored {

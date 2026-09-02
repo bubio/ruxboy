@@ -1,0 +1,76 @@
+/// SDL3 オーディオ出力とオーディオ駆動ペーシング。
+/// PLAN.md 1.3「実行速度の同期はオーディオ駆動(壁時計不使用)を踏襲する」。
+/// 移植元: `~/dev/_Emu/BubiBoyLite/src/app/audio.odin`(T5-6相当。
+/// `docs/dev/phases/phase-05-apu.md`「スコープの調整」によりフェーズ8へ持ち越されていた分)。
+
+import Core::MutableSlice;
+import GbCore::{ Apu, ApuDrainSamples };
+import Sdl3::{
+    SdlAudioS16Le, SdlAudioDeviceDefaultPlayback, SdlAudioSpec,
+    SDL_OpenAudioDeviceStream, SDL_PutAudioStreamData, SDL_ResumeAudioStreamDevice,
+    SDL_GetAudioStreamQueued, SDL_DestroyAudioStream, SDL_Delay,
+};
+
+const SampleRate: int32 = 48000;
+const Channels: int32 = 2;
+const BytesPerSample: int32 = 2;
+/// ペーシングの目標: キューに積まれたバイト数がこれを超える間は新フレームの
+/// 生成を待つ(=オーディオの消費速度で実行速度が決まる)。約4フレーム分。
+const TargetQueuedBytes: int32 = (SampleRate / 60) * Channels * BytesPerSample * 4;
+
+pub struct Audio {
+    pub stream: *opaque;
+}
+
+pub func AudioInit() -> Audio {
+    var a: Audio;
+    var spec: SdlAudioSpec;
+    spec.format = SdlAudioS16Le;
+    spec.channels = Channels;
+    spec.freq = SampleRate;
+
+    a.stream = SDL_OpenAudioDeviceStream(SdlAudioDeviceDefaultPlayback, @spec, null, null);
+    if a.stream != null {
+        SDL_ResumeAudioStreamDevice(a.stream);
+    }
+    return a;
+}
+
+pub func AudioIsValid(a: *Audio) -> bool {
+    return a.stream != null;
+}
+
+/// `volume`(0-100)を適用しつつ、APUに溜まっているサンプルをオーディオストリームへ
+/// 送る。
+pub func AudioPushFrame(a: *Audio, apu: *var Apu, volume: int32) {
+    if a.stream == null { return; }
+
+    var buf: int16[4096];
+    let drained = ApuDrainSamples(apu, MutableSlice::From<int16>(@buf[0], 4096));
+
+    if volume != 100 {
+        var i: uint = 0;
+        while i < drained {
+            let scaled = (buf[i] as int32) * volume / 100;
+            buf[i] = scaled as int16;
+            i += 1;
+        }
+    }
+
+    SDL_PutAudioStreamData(a.stream, @buf[0] as *opaque, (drained * 2) as int32);
+}
+
+/// キューが溜まりすぎないよう待つ(オーディオ駆動ペーシング。壁時計は読まない)。
+pub func AudioPace(a: *Audio) {
+    if a.stream == null { return; }
+    while SDL_GetAudioStreamQueued(a.stream) > TargetQueuedBytes {
+        SDL_Delay(1);
+    }
+}
+
+pub func AudioDestroy(a: *var Audio) {
+    if a.stream != null {
+        SDL_DestroyAudioStream(a.stream);
+        a.stream = null;
+    }
+}

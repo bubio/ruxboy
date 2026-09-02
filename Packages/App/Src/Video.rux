@@ -1,0 +1,111 @@
+/// SDL3 ウィンドウ/レンダラ/テクスチャの管理。移植元:
+/// `~/dev/_Emu/BubiBoyLite/src/app/video.odin`。
+
+import Core::Slice;
+import Sdl3::{
+    SdlPixelFormatArgb8888, SdlTextureAccessStreaming, SdlTextureAccessTarget,
+    SdlScaleModeNearest, SdlScaleModeLinear, SdlLogicalPresentationIntegerScale,
+    SdlWindowFullscreen, SdlWindowHidden,
+    SDL_CreateWindow, SDL_DestroyWindow, SDL_SetWindowTitle,
+    SDL_CreateRenderer, SDL_DestroyRenderer,
+    SDL_CreateTexture, SDL_DestroyTexture,
+    SDL_UpdateTexture, SDL_SetTextureScaleMode,
+    SDL_SetRenderLogicalPresentation, SDL_SetRenderDrawColor,
+    SDL_RenderClear, SDL_RenderTexture, SDL_RenderPresent, SDL_SetRenderTarget,
+    SDL_RenderReadPixels, SDL_SaveBMP, SDL_DestroySurface,
+};
+
+pub const VideoScreenWidth: int32 = 160;
+pub const VideoScreenHeight: int32 = 144;
+
+pub struct Video {
+    pub window: *opaque;
+    pub renderer: *opaque;
+    pub texture: *opaque;
+    /// スクリーンショット読み戻し専用のレンダーターゲットテクスチャ。非表示ウィンドウ
+    /// (`--headless`)では`SDL_RenderReadPixels`がウィンドウの描画先バックバッファから
+    /// 読めない(macOSではOSコンポジタがウィンドウを一度も提示しないため)。ウィンドウの
+    /// 可視性に依存しない専用ターゲットへ描画してから読み戻すことで回避する。
+    pub captureTexture: *opaque;
+}
+
+/// ウィンドウ/レンダラ/テクスチャ一式を作る。`hidden`は`--headless`用
+/// (ウィンドウを作りはするがOSに表示しない。フレームバッファ読み戻し用の
+/// レンダラは実ウィンドウを必要とするため、完全な「ウィンドウ無し」では動かせない)。
+pub func VideoInit(title: *char8, scale: int32, fullscreen: bool, smooth: bool, hidden: bool) -> Video {
+    var v: Video;
+
+    var flags: uint64 = 0;
+    if fullscreen { flags = flags | SdlWindowFullscreen; }
+    if hidden { flags = flags | SdlWindowHidden; }
+
+    v.window = SDL_CreateWindow(title, VideoScreenWidth * scale, VideoScreenHeight * scale, flags);
+    if v.window == null { return v; }
+
+    v.renderer = SDL_CreateRenderer(v.window, null);
+    if v.renderer == null {
+        SDL_DestroyWindow(v.window);
+        v.window = null;
+        return v;
+    }
+
+    v.texture = SDL_CreateTexture(v.renderer, SdlPixelFormatArgb8888, SdlTextureAccessStreaming,
+                                   VideoScreenWidth, VideoScreenHeight);
+    if v.texture == null {
+        SDL_DestroyRenderer(v.renderer);
+        SDL_DestroyWindow(v.window);
+        v.window = null;
+        v.renderer = null;
+        return v;
+    }
+
+    SDL_SetTextureScaleMode(v.texture, smooth ? SdlScaleModeLinear : SdlScaleModeNearest);
+    SDL_SetRenderLogicalPresentation(v.renderer, VideoScreenWidth, VideoScreenHeight, SdlLogicalPresentationIntegerScale);
+
+    v.captureTexture = SDL_CreateTexture(v.renderer, SdlPixelFormatArgb8888, SdlTextureAccessTarget,
+                                          VideoScreenWidth, VideoScreenHeight);
+
+    return v;
+}
+
+pub func VideoIsValid(v: *Video) -> bool {
+    return v.window != null && v.renderer != null && v.texture != null;
+}
+
+/// PPUのフレームバッファ(160x144 ARGB)を描画する。
+pub func VideoPresent(v: *Video, framebuffer: *uint32) {
+    SDL_UpdateTexture(v.texture, null, framebuffer as *opaque, VideoScreenWidth * 4);
+    SDL_SetRenderDrawColor(v.renderer, 0, 0, 0, 255);
+    SDL_RenderClear(v.renderer);
+    SDL_RenderTexture(v.renderer, v.texture, null, null);
+    SDL_RenderPresent(v.renderer);
+}
+
+/// 現在の描画内容をBMPへ保存する(`--screenshot`用の検証手段)。`captureTexture`
+/// (ウィンドウの可視性に依存しないオフスクリーンターゲット)へ描き直してから読み戻す。
+pub func VideoScreenshot(v: *Video, path: *char8) -> bool {
+    if v.captureTexture == null { return false; }
+
+    SDL_SetRenderTarget(v.renderer, v.captureTexture);
+    SDL_RenderTexture(v.renderer, v.texture, null, null);
+    let surface = SDL_RenderReadPixels(v.renderer, null);
+    SDL_SetRenderTarget(v.renderer, null);
+
+    if surface == null { return false; }
+    let ok = SDL_SaveBMP(surface, path);
+    SDL_DestroySurface(surface);
+    return ok;
+}
+
+pub func VideoSetTitle(v: *Video, title: *char8) {
+    if v.window != null {
+        SDL_SetWindowTitle(v.window, title);
+    }
+}
+
+pub func VideoDestroy(v: *var Video) {
+    if v.captureTexture != null { SDL_DestroyTexture(v.captureTexture); v.captureTexture = null; }
+    if v.texture != null { SDL_DestroyTexture(v.texture); v.texture = null; }
+    if v.renderer != null { SDL_DestroyRenderer(v.renderer); v.renderer = null; }
+    if v.window != null { SDL_DestroyWindow(v.window); v.window = null; }
+}

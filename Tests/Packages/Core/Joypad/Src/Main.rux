@@ -1,0 +1,66 @@
+import GbCore::{
+    Bus,
+    BusInit, BusRead, BusWrite,
+    JoypadRight, JoypadLeft, JoypadUp, JoypadDown,
+    JoypadA, JoypadB, JoypadSelect, JoypadStart,
+    JoypadSetButton
+};
+
+func Main() -> int {
+    // --- 未選択・非押下時は全ビット1(プルアップ) ---
+    var bus: Bus;
+    BusInit(@bus);
+    if BusRead(@bus, 0xFF00) != 0xFF { return 1; }
+
+    // --- 方向キー選択(bit4=0) ---
+    BusWrite(@bus, 0xFF00, 0x20); // bit5=1(アクション非選択)、bit4=0(方向キー選択)
+    if BusRead(@bus, 0xFF00) != 0xEF { return 2; } // 0xE0 | 0x0F(全方向非押下)
+
+    JoypadSetButton(@bus, JoypadRight, true);
+    if BusRead(@bus, 0xFF00) != 0xEE { return 3; } // bit0が0(Right押下)
+
+    JoypadSetButton(@bus, JoypadDown, true);
+    if BusRead(@bus, 0xFF00) != 0xE6 { return 4; } // bit0/bit3が0(Right+Down押下)
+
+    // アクションボタン(未選択)を押しても方向キー選択中は反映されない
+    JoypadSetButton(@bus, JoypadA, true);
+    if BusRead(@bus, 0xFF00) != 0xE6 { return 5; }
+
+    JoypadSetButton(@bus, JoypadRight, false);
+    if BusRead(@bus, 0xFF00) != 0xE7 { return 6; }
+
+    // --- アクションボタン選択(bit5=0) ---
+    BusWrite(@bus, 0xFF00, 0x10); // bit5=0(アクション選択)、bit4=1(方向キー非選択)
+    if BusRead(@bus, 0xFF00) != 0xDE { return 7; } // Aは押下中のまま(bit0=0)
+
+    JoypadSetButton(@bus, JoypadStart, true);
+    if BusRead(@bus, 0xFF00) != 0xD6 { return 8; } // bit0(A)/bit3(Start)が0
+
+    // --- 両グループ選択(bit4/5=0)は両グループのANDが出力される ---
+    BusWrite(@bus, 0xFF00, 0x00);
+    if BusRead(@bus, 0xFF00) != 0xC6 { return 9; } // Down(bit3方向)とA/Start(bit0/3アクション)のAND
+
+    // --- 割り込み(IF bit4) ---
+    var bus2: Bus;
+    BusInit(@bus2);
+    BusWrite(@bus2, 0xFF0F, 0x00); // IFクリア
+    BusWrite(@bus2, 0xFF00, 0x20); // 方向キー選択
+    JoypadSetButton(@bus2, JoypadUp, true);
+    if (BusRead(@bus2, 0xFF0F) & 0x10) == 0 { return 10; } // 選択中グループの押下でIF bit4が立つ
+
+    BusWrite(@bus2, 0xFF0F, 0x00);
+    JoypadSetButton(@bus2, JoypadUp, false);
+    if (BusRead(@bus2, 0xFF0F) & 0x10) != 0 { return 11; } // 離した(1→0)では立たない
+
+    var bus3: Bus;
+    BusInit(@bus3);
+    BusWrite(@bus3, 0xFF0F, 0x00);
+    BusWrite(@bus3, 0xFF00, 0x10); // アクション選択(方向キーは非選択)
+    JoypadSetButton(@bus3, JoypadLeft, true); // 非選択グループなので割り込みなし
+    if (BusRead(@bus3, 0xFF0F) & 0x10) != 0 { return 12; }
+
+    JoypadSetButton(@bus3, JoypadB, true); // 選択中グループなので割り込みあり
+    if (BusRead(@bus3, 0xFF0F) & 0x10) == 0 { return 13; }
+
+    return 0;
+}

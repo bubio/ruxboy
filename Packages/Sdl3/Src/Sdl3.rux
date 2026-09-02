@@ -27,6 +27,7 @@ pub const SdlInitVideo: uint32 = 0x00000020;
 
 pub const SdlPixelFormatArgb8888: uint32 = 0x16362004;
 pub const SdlTextureAccessStreaming: int32 = 1;
+pub const SdlTextureAccessTarget: int32 = 2;
 
 pub const SdlScaleModeNearest: int32 = 0;
 pub const SdlScaleModeLinear: int32 = 1;
@@ -39,8 +40,22 @@ pub const SdlEventKeyUp: uint32 = 0x301;
 
 pub const SdlScancodeEscape: uint32 = 41;
 pub const SdlScancodeSpace: uint32 = 44;
+pub const SdlScancodeX: uint32 = 27;
+pub const SdlScancodeZ: uint32 = 29;
+pub const SdlScancodeReturn: uint32 = 40;
+pub const SdlScancodeRight: uint32 = 79;
+pub const SdlScancodeLeft: uint32 = 80;
+pub const SdlScancodeDown: uint32 = 81;
+pub const SdlScancodeUp: uint32 = 82;
+pub const SdlScancodeRShift: uint32 = 229;
+pub const SdlScancodeF1: uint32 = 58;
+pub const SdlScancodeF3: uint32 = 60;
+
+pub const SdlWindowFullscreen: uint64 = 0x0000000000000001;
+pub const SdlWindowHidden: uint64 = 0x0000000000000008;
 
 pub const SdlAudioS16Le: uint32 = 0x8010;
+pub const SdlAudioDeviceDefaultPlayback: uint32 = 0xFFFFFFFF;
 
 // --- 構造体 -------------------------------------------------------------
 // Rux の構造体は宣言順・自然アライメントで配置され、フィールドの並べ替えを
@@ -110,6 +125,7 @@ pub extern {
     func SDL_UpdateTexture(texture: *opaque, rect: *SdlRect, pixels: *opaque, pitch: int32) -> bool8;
     func SDL_SetTextureScaleMode(texture: *opaque, scaleMode: int32) -> bool8;
     func SDL_SetRenderLogicalPresentation(renderer: *opaque, w: int32, h: int32, mode: int32) -> bool8;
+    func SDL_SetRenderTarget(renderer: *opaque, texture: *opaque) -> bool8;
     func SDL_SetRenderDrawColor(renderer: *opaque, r: uint8, g: uint8, b: uint8, a: uint8) -> bool8;
     func SDL_RenderClear(renderer: *opaque) -> bool8;
     func SDL_RenderTexture(renderer: *opaque, texture: *opaque, srcrect: *SdlFRect, dstrect: *SdlFRect) -> bool8;

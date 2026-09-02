@@ -77,6 +77,14 @@ pub struct Bus {
     pub dmaIndex: int;
     pub dmaStartDelay: int;
     pub dmaPendingSource: uint16;
+
+    // Joypad (FF00)
+    /// JOYP bit5=0で選択(アクションボタン: A/B/Select/Start)。
+    pub joypSelectAction: bool;
+    /// JOYP bit4=0で選択(方向キー: Right/Left/Up/Down)。
+    pub joypSelectDirection: bool;
+    /// 押下中のボタンのビットマスク(`JoypadButtonBit`参照)。
+    pub joypPressed: uint8;
 }
 
 /// Bus を初期状態にする(全レジスタ0、ROM未ロード)。実 BIOS 相当の初期値は
@@ -111,6 +119,9 @@ pub func BusInit(bus: *var Bus) {
     bus.dmaIndex = 0;
     bus.dmaStartDelay = 0;
     bus.dmaPendingSource = 0;
+    bus.joypSelectAction = false;
+    bus.joypSelectDirection = false;
+    bus.joypPressed = 0;
     ApuReset(@bus.apu);
 
     var i: uint = 0;
@@ -344,9 +355,86 @@ pub func BusWrite(bus: *var Bus, addr: uint16, value: uint8) {
     }
 }
 
+// --- Joypad (FF00) ---
+// 参照: ~/dev/_Emu/BubiBoyLite/src/core/joypad.odin。
+// JOYP は負論理: 0=選択/押下、1=非選択/非押下。bit5=0でアクション(A/B/Select/Start)を
+// bit3-0に反映、bit4=0で方向キー(Right/Left/Up/Down)をbit3-0に反映。両方選択時は
+// 両グループのANDが出力される。上位2bitは常に1で読める。
+
+pub const JoypadRight: uint8 = 0;
+pub const JoypadLeft: uint8 = 1;
+pub const JoypadUp: uint8 = 2;
+pub const JoypadDown: uint8 = 3;
+pub const JoypadA: uint8 = 4;
+pub const JoypadB: uint8 = 5;
+pub const JoypadSelect: uint8 = 6;
+pub const JoypadStart: uint8 = 7;
+
+func JoypadButtonBit(button: uint8) -> uint8 {
+    return (1 as uint8) << button;
+}
+
+func JoypadButtonGroupSelected(bus: *Bus, button: uint8) -> bool {
+    if button == JoypadA || button == JoypadB || button == JoypadSelect || button == JoypadStart {
+        return bus.joypSelectAction;
+    }
+    return bus.joypSelectDirection;
+}
+
+/// ボタンの押下状態を更新する。選択中のグループのボタンが0(非押下)→1(押下)に
+/// 変化したときジョイパッド割り込み(IF bit4)を要求する。
+pub func JoypadSetButton(bus: *var Bus, button: uint8, pressed: bool) {
+    let bit = JoypadButtonBit(button);
+    let wasPressed = (bus.joypPressed & bit) != 0;
+
+    if pressed {
+        bus.joypPressed = bus.joypPressed | bit;
+    } else {
+        bus.joypPressed = bus.joypPressed & ~bit;
+    }
+
+    if pressed && !wasPressed && JoypadButtonGroupSelected(bus, button) {
+        bus.io[0x0F] = bus.io[0x0F] | 0x10;
+    }
+}
+
+/// JOYP(FF00)への書き込みを処理する: bit5/bit4だけが意味を持つ(0=選択)。
+/// bit3-0への書き込みは無視される(読み取り専用)。
+func JoypadWriteP1(bus: *var Bus, value: uint8) {
+    bus.joypSelectAction = (value & 0x20) == 0;
+    bus.joypSelectDirection = (value & 0x10) == 0;
+}
+
+/// JOYPの現在値を負論理エンコーディングで返す。
+func JoypadReadP1(bus: *Bus) -> uint8 {
+    var selectBits: uint8 = 0xC0; // 上位2bitは常に1
+    if !bus.joypSelectAction { selectBits = selectBits | 0x20; }
+    if !bus.joypSelectDirection { selectBits = selectBits | 0x10; }
+
+    var actionBits: uint8 = 0x0F;
+    if bus.joypSelectAction {
+        if (bus.joypPressed & JoypadButtonBit(JoypadA)) != 0 { actionBits = actionBits & ~(0x01 as uint8); }
+        if (bus.joypPressed & JoypadButtonBit(JoypadB)) != 0 { actionBits = actionBits & ~(0x02 as uint8); }
+        if (bus.joypPressed & JoypadButtonBit(JoypadSelect)) != 0 { actionBits = actionBits & ~(0x04 as uint8); }
+        if (bus.joypPressed & JoypadButtonBit(JoypadStart)) != 0 { actionBits = actionBits & ~(0x08 as uint8); }
+    }
+
+    var directionBits: uint8 = 0x0F;
+    if bus.joypSelectDirection {
+        if (bus.joypPressed & JoypadButtonBit(JoypadRight)) != 0 { directionBits = directionBits & ~(0x01 as uint8); }
+        if (bus.joypPressed & JoypadButtonBit(JoypadLeft)) != 0 { directionBits = directionBits & ~(0x02 as uint8); }
+        if (bus.joypPressed & JoypadButtonBit(JoypadUp)) != 0 { directionBits = directionBits & ~(0x04 as uint8); }
+        if (bus.joypPressed & JoypadButtonBit(JoypadDown)) != 0 { directionBits = directionBits & ~(0x08 as uint8); }
+    }
+
+    return selectBits | (actionBits & directionBits);
+}
+
 /// I/O レジスタ領域(FF00-FF7F)の読み出しをレジスタごとに振り分ける。
 func BusIoRead(bus: *Bus, addr: uint16) -> uint8 {
-    if addr == 0xFF04 {
+    if addr == 0xFF00 {
+        return JoypadReadP1(bus);
+    } else if addr == 0xFF04 {
         return (bus.divCounter >> 8) as uint8;
     } else if addr == 0xFF05 {
         return bus.tima;
@@ -430,7 +518,9 @@ pub func TimerWriteDiv(bus: *var Bus) {
 
 /// I/O レジスタ領域(FF00-FF7F)の書き込みをレジスタごとに振り分ける。
 func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
-    if addr == 0xFF04 {
+    if addr == 0xFF00 {
+        JoypadWriteP1(bus, value);
+    } else if addr == 0xFF04 {
         TimerWriteDiv(bus);
     } else if addr == 0xFF05 {
         if !bus.timerReloadJustHappened {

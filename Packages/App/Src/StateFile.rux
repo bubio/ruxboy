@@ -1,0 +1,63 @@
+/// セーブステート(.state)ファイルの読み書き。移植元:
+/// `~/dev/_Emu/BubiBoyLite/src/app/statefile.odin`。スロット選択(F1-F4)は移植対象外
+/// (単一の暗黙スロットのみ、`docs/dev/phases/phase-08-frontend.md`参照) — F1で保存、
+/// F3で復元する。
+
+import Core::{ MutableSlice, Slice };
+import GbCore::{ Cpu, Bus, SaveStateExpectedSize, SaveStateWrite, SaveStateRead, SaveStateError };
+
+/// `romPath`の拡張子を`.state`に置き換えたパスを`buf`へ書く(`SaveRam.rux`の
+/// `SaveRamPath`と同じ規則)。
+func StatePath(romPath: Slice<char8>, buf: *var PathBuf) {
+    var lastSlash: int = -1;
+    var lastDot: int = -1;
+    var i: uint = 0;
+    while i < romPath.length {
+        let ch = romPath.data[i];
+        if ch == c8'/' { lastSlash = i as int; }
+        if ch == c8'.' { lastDot = i as int; }
+        i += 1;
+    }
+
+    PathBufClear(buf);
+    if lastDot > lastSlash {
+        PathBufAppend(buf, Slice<char8> { data: romPath.data, length: lastDot as uint });
+    } else {
+        PathBufAppend(buf, romPath);
+    }
+    PathBufAppend(buf, ".state");
+}
+
+pub func SaveStateToFile(cpu: *Cpu, bus: *Bus, romPath: Slice<char8>) -> bool {
+    let size = SaveStateExpectedSize(bus);
+    let block = malloc(size) as *var uint8;
+    if block == null { return false; }
+
+    let written = SaveStateWrite(cpu, bus, MutableSlice::From<uint8>(block, size));
+
+    var pathBuf: PathBuf;
+    StatePath(romPath, @pathBuf);
+    var tmpBuf: PathBuf;
+    PathBufClear(@tmpBuf);
+    PathBufAppend(@tmpBuf, PathBufAsSlice(@pathBuf));
+    PathBufAppend(@tmpBuf, ".tmp");
+
+    let ok = WriteFileAtomic(PathBufCStr(@pathBuf), PathBufCStr(@tmpBuf), block, written);
+    free(block as *var opaque);
+    return ok;
+}
+
+pub func LoadStateFromFile(cpu: *var Cpu, bus: *var Bus, romPath: Slice<char8>) -> bool {
+    var pathBuf: PathBuf;
+    StatePath(romPath, @pathBuf);
+    let path = PathBufCStr(@pathBuf);
+    if !PathExists(path) { return false; }
+
+    var length: uint = 0;
+    let data = ReadEntireFile(path, @length);
+    if data == null { return false; }
+
+    let err = SaveStateRead(cpu, bus, Slice<uint8> { data: data, length: length });
+    free(data as *var opaque);
+    return err == SaveStateError::None;
+}

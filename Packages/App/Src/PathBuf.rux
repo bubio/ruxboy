@@ -1,0 +1,100 @@
+/// 固定長バッファでパス文字列を組み立てるための最小限のヘルパー。`Rux/Text`の
+/// `StringBuilder`(ヒープ確保が必要)を使わず、既存コード(`Tests/Packages/Core/Blargg`の
+/// パス連結)と同じ「固定バッファ+インデックスコピー」方式に揃えた。
+
+import Core::Slice;
+
+pub const PathBufCapacity: uint = 1024;
+
+pub struct PathBuf {
+    pub bytes: char8[1024];
+    pub len: uint;
+}
+
+pub func PathBufClear(buf: *var PathBuf) {
+    buf.len = 0;
+}
+
+pub func PathBufAppend(buf: *var PathBuf, s: Slice<char8>) {
+    var i: uint = 0;
+    while i < s.length && buf.len < PathBufCapacity - 1 {
+        buf.bytes[buf.len] = s.data[i];
+        buf.len += 1;
+        i += 1;
+    }
+}
+
+pub func PathBufAppendCStr(buf: *var PathBuf, s: *char8) {
+    var i: uint = 0;
+    while *(s + i) != 0 && buf.len < PathBufCapacity - 1 {
+        buf.bytes[buf.len] = *(s + i);
+        buf.len += 1;
+        i += 1;
+    }
+}
+
+pub func PathBufAppendByte(buf: *var PathBuf, b: char8) {
+    if buf.len < PathBufCapacity - 1 {
+        buf.bytes[buf.len] = b;
+        buf.len += 1;
+    }
+}
+
+/// 10進非負整数を追記する。
+pub func PathBufAppendInt(buf: *var PathBuf, value: int32) {
+    if value == 0 {
+        PathBufAppendByte(buf, c8'0');
+        return;
+    }
+    var v = value;
+    var digits: char8[12];
+    var count: uint = 0;
+    while v > 0 {
+        digits[count] = c8'0' + ((v % 10) as char8);
+        v /= 10;
+        count += 1;
+    }
+    var i: uint = count;
+    while i > 0 {
+        i -= 1;
+        PathBufAppendByte(buf, digits[i]);
+    }
+}
+
+/// 現在の内容をnull終端し、`*char8`として返す(バッファは`buf`の寿命に依存)。
+pub func PathBufCStr(buf: *var PathBuf) -> *char8 {
+    buf.bytes[buf.len] = c8'\0';
+    return @buf.bytes[0];
+}
+
+pub func PathBufAsSlice(buf: *PathBuf) -> Slice<char8> {
+    return Slice<char8> { data: @buf.bytes[0], length: buf.len };
+}
+
+/// `Slice<char8>`のバイト単位比較。App package全体で共有する
+/// (以前はCli.rux/Config.rux/Recent.rux にそれぞれ同じ実装が重複していた)。
+pub func SliceEquals(a: Slice<char8>, b: Slice<char8>) -> bool {
+    if a.length != b.length { return false; }
+    var i: uint = 0;
+    while i < a.length {
+        if a.data[i] != b.data[i] { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+/// 10進の非負整数をパースする(空文字列・非数字を含む場合は失敗)。
+/// App package全体で共有する(以前はCli.rux/Config.rux にそれぞれ重複していた)。
+pub func ParseUintSlice(s: Slice<char8>, result: *var int32) -> bool {
+    if s.length == 0 { return false; }
+    var value: int32 = 0;
+    var i: uint = 0;
+    while i < s.length {
+        let ch = s.data[i];
+        if ch < c8'0' || ch > c8'9' { return false; }
+        value = value * 10 + ((ch - c8'0') as int32);
+        i += 1;
+    }
+    *result = value;
+    return true;
+}

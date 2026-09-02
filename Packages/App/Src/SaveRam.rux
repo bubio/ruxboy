@@ -1,0 +1,74 @@
+/// バッテリーバックアップRAM(.sav)の読み書き。移植元:
+/// `~/dev/_Emu/BubiBoyLite/src/app/saveram.odin`。デフォルト配置(ROMと同じ場所、
+/// 拡張子だけ.savに置き換え)のみを実装する(save_dir設定による変更は移植対象外、
+/// `Config.rux`のコメント参照)。RTC(.rtc)の永続化も移植対象外(MBC3のRTCは
+/// セッション内では動くが、`MbcSyncWallClock`の基準時刻はプロセス終了とともに失われる
+/// — 既知の制限として`docs/dev/phases/phase-08-frontend.md`に記録する)。
+
+import Core::Slice;
+import GbCore::Bus;
+
+/// `romPath`の拡張子を`.sav`に置き換えたパスを`buf`へ書く(パス区切りより後ろの
+/// 最後の"."だけを拡張子とみなす。`save_ram_path_for_rom`と同じ規則)。
+func SaveRamPath(romPath: Slice<char8>, buf: *var PathBuf) {
+    var lastSlash: int = -1;
+    var lastDot: int = -1;
+    var i: uint = 0;
+    while i < romPath.length {
+        let ch = romPath.data[i];
+        if ch == c8'/' { lastSlash = i as int; }
+        if ch == c8'.' { lastDot = i as int; }
+        i += 1;
+    }
+
+    PathBufClear(buf);
+    if lastDot > lastSlash {
+        PathBufAppend(buf, Slice<char8> { data: romPath.data, length: lastDot as uint });
+    } else {
+        PathBufAppend(buf, romPath);
+    }
+    PathBufAppend(buf, ".sav");
+}
+
+/// `.sav`が存在すれば`bus.cart.ram`へ読み込む。バッテリー非搭載カートリッジ・
+/// ファイル未存在時は何もしない(初回起動は通常であってエラーではない)。
+pub func LoadSaveRam(bus: *var Bus, romPath: Slice<char8>) {
+    if !bus.cart.info.hasBattery || bus.cart.ramLength == 0 { return; }
+
+    var pathBuf: PathBuf;
+    SaveRamPath(romPath, @pathBuf);
+    let path = PathBufCStr(@pathBuf);
+    if !PathExists(path) { return; }
+
+    var length: uint = 0;
+    let data = ReadEntireFile(path, @length);
+    if data == null { return; }
+
+    var n = length;
+    if n > bus.cart.ramLength { n = bus.cart.ramLength; }
+    var i: uint = 0;
+    while i < n {
+        bus.cart.ram[i] = data[i];
+        i += 1;
+    }
+    free(data as *var opaque);
+}
+
+/// `bus.cart.ram`を`.sav`へアトミック書き込みする。バッテリー非搭載時は何もしない。
+/// 書き込み成功時は`ramDirty`をクリアする(次回呼び出しでの無駄な書き込みを避ける)。
+pub func SaveSaveRam(bus: *var Bus, romPath: Slice<char8>) -> bool {
+    if !bus.cart.info.hasBattery || bus.cart.ramLength == 0 { return true; }
+
+    var pathBuf: PathBuf;
+    SaveRamPath(romPath, @pathBuf);
+    var tmpBuf: PathBuf;
+    PathBufClear(@tmpBuf);
+    PathBufAppend(@tmpBuf, PathBufAsSlice(@pathBuf));
+    PathBufAppend(@tmpBuf, ".tmp");
+
+    let ok = WriteFileAtomic(PathBufCStr(@pathBuf), PathBufCStr(@tmpBuf), @bus.cart.ram[0], bus.cart.ramLength);
+    if ok {
+        bus.cart.ramDirty = false;
+    }
+    return ok;
+}

@@ -1,0 +1,177 @@
+/// 設定ファイル(config.txt)の読み込み/生成。
+/// 移植元: `~/dev/_Emu/BubiBoyLite/src/app/config.odin`。BubiBoy Lite は「実行ファイルと
+/// 同じ場所」に置いたが、`docs/BluePrint.md`「設定ファイルなどの置き場所はOSの習慣に
+/// 従うこと」により、macOSでは `~/Library/Application Support/RuxBoy/config.txt` に変更した
+/// (BubiBoy Lite の決定はRuxBoyにそのまま適用されない、CLAUDE.md参照)。
+///
+/// フォーマット: TOMLではなく`key = value`の単純な行指向テキスト(`#`から行末はコメント)。
+/// `Rux/Toml`(標準ライブラリ)を使わない理由: `Packages/App/Rux.toml`のコメント参照
+/// (レジストリが404で解決できず、`Core`以外の標準ライブラリパッケージは
+/// `rux build`の依存解決の壁に当たるため使えない)。
+///
+/// キー割り当て(key_map/pad_map)・保存先ディレクトリ変更(save_dir/state_dir)・
+/// 表示言語(lang)は移植対象外(フェーズ8では固定のデフォルトキー配置のみ、
+/// TUIが無いため設定用メニューも無い)。将来必要になれば追加する。
+
+import Core::Slice;
+
+pub const ConfigDefaultVolume: int32 = 100;
+
+pub struct AppConfig {
+    pub scale: int32;
+    pub fullscreen: bool;
+    pub smooth: bool;
+    pub volume: int32;
+}
+
+pub func ConfigDefault() -> AppConfig {
+    var c: AppConfig;
+    c.scale = CliDefaultScale;
+    c.fullscreen = false;
+    c.smooth = false;
+    c.volume = ConfigDefaultVolume;
+    return c;
+}
+
+/// `~/Library/Application Support/RuxBoy` を`buf`へ書く。HOME未設定時はfalse。
+func AppSupportDir(buf: *var PathBuf) -> bool {
+    let home = GetEnv("HOME\0".data);
+    if home == null { return false; }
+    PathBufClear(buf);
+    PathBufAppendCStr(buf, home);
+    PathBufAppend(buf, "/Library/Application Support/RuxBoy");
+    return true;
+}
+
+func ConfigFilePath(buf: *var PathBuf) -> bool {
+    if !AppSupportDir(buf) { return false; }
+    PathBufAppend(buf, "/config.txt");
+    return true;
+}
+
+func IsSpace(ch: char8) -> bool {
+    return ch == c8' ' || ch == c8'\t' || ch == c8'\r';
+}
+
+func TrimSlice(s: Slice<char8>) -> Slice<char8> {
+    var start: uint = 0;
+    var end: uint = s.length;
+    while start < end && IsSpace(s.data[start]) { start += 1; }
+    while end > start && IsSpace(s.data[end - 1]) { end -= 1; }
+    return Slice<char8> { data: @s.data[start], length: end - start };
+}
+
+/// `key = value`形式の1行を解析し、`config`の該当フィールドへ反映する。未知のキー・
+/// 不正な値は無視する(起動を止めない)。
+func ApplyConfigLine(line: Slice<char8>, config: *var AppConfig) {
+    var content = line;
+    // '#' 以降はコメント。
+    var i: uint = 0;
+    while i < content.length {
+        if content.data[i] == c8'#' {
+            content = Slice<char8> { data: content.data, length: i };
+            break;
+        }
+        i += 1;
+    }
+
+    var eq: uint = 0;
+    var found = false;
+    while eq < content.length {
+        if content.data[eq] == c8'=' { found = true; break; }
+        eq += 1;
+    }
+    if !found { return; }
+
+    let key = TrimSlice(Slice<char8> { data: content.data, length: eq });
+    let value = TrimSlice(Slice<char8> { data: @content.data[eq + 1], length: content.length - eq - 1 });
+
+    if SliceEquals(key, "scale") {
+        var n: int32 = 0;
+        if ParseUintSlice(value, @n) && n >= 1 && n <= 8 {
+            config.scale = n;
+        }
+    } else if SliceEquals(key, "fullscreen") {
+        if SliceEquals(value, "true") { config.fullscreen = true; }
+        else if SliceEquals(value, "false") { config.fullscreen = false; }
+    } else if SliceEquals(key, "shader") {
+        if SliceEquals(value, "smooth") { config.smooth = true; }
+        else if SliceEquals(value, "nearest") { config.smooth = false; }
+    } else if SliceEquals(key, "volume") {
+        var n: int32 = 0;
+        if ParseUintSlice(value, @n) && n >= 0 && n <= 100 {
+            config.volume = n;
+        }
+    }
+}
+
+func RenderConfig(config: *AppConfig, buf: *var PathBuf) {
+    PathBufClear(buf);
+    PathBufAppend(buf, "# RuxBoy 設定ファイル。手動で編集してもよい(不正な行は無視される)。\n");
+    PathBufAppend(buf, "scale = ");
+    PathBufAppendInt(buf, config.scale);
+    PathBufAppendByte(buf, c8'\n');
+    PathBufAppend(buf, "fullscreen = ");
+    PathBufAppend(buf, config.fullscreen ? "true" : "false");
+    PathBufAppendByte(buf, c8'\n');
+    PathBufAppend(buf, "shader = ");
+    PathBufAppend(buf, config.smooth ? "smooth" : "nearest");
+    PathBufAppendByte(buf, c8'\n');
+    PathBufAppend(buf, "volume = ");
+    PathBufAppendInt(buf, config.volume);
+    PathBufAppendByte(buf, c8'\n');
+}
+
+pub func ConfigSave(config: *AppConfig) -> bool {
+    var dirBuf: PathBuf;
+    if !AppSupportDir(@dirBuf) { return false; }
+    if !EnsureDirectory(PathBufCStr(@dirBuf)) { return false; }
+
+    var body: PathBuf;
+    RenderConfig(config, @body);
+
+    var pathBuf: PathBuf;
+    if !ConfigFilePath(@pathBuf) { return false; }
+    var tmpBuf: PathBuf;
+    PathBufClear(@tmpBuf);
+    PathBufAppend(@tmpBuf, PathBufAsSlice(@pathBuf));
+    PathBufAppend(@tmpBuf, ".tmp");
+
+    let bytes = PathBufAsSlice(@body);
+    return WriteFileAtomic(PathBufCStr(@pathBuf), PathBufCStr(@tmpBuf), bytes.data as *uint8, bytes.length);
+}
+
+/// 設定ファイルを読み込む。存在しなければデフォルト値で新規作成する
+/// (`~/dev/_Emu/BubiBoyLite/src/app/config.odin`「起動時になければ全デフォルト値で作成」)。
+/// 壊れている・一部キーが無い場合は該当フィールドのみデフォルトへフォールバックする
+/// (起動を止めない)。
+pub func ConfigLoad() -> AppConfig {
+    var config = ConfigDefault();
+
+    var pathBuf: PathBuf;
+    if !ConfigFilePath(@pathBuf) { return config; }
+    let path = PathBufCStr(@pathBuf);
+
+    if !PathExists(path) {
+        ConfigSave(@config);
+        return config;
+    }
+
+    var length: uint = 0;
+    let data = ReadEntireFile(path, @length);
+    if data == null { return config; }
+
+    let bytes = Slice<char8> { data: data as *char8, length: length };
+    var lineStart: uint = 0;
+    var i: uint = 0;
+    while i <= bytes.length {
+        if i == bytes.length || bytes.data[i] == c8'\n' {
+            ApplyConfigLine(Slice<char8> { data: @bytes.data[lineStart], length: i - lineStart }, @config);
+            lineStart = i + 1;
+        }
+        i += 1;
+    }
+
+    free(data as *var opaque);
+    return config;
+}

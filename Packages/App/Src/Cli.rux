@@ -1,0 +1,150 @@
+/// コマンドライン引数の解析(移植元: `~/dev/_Emu/BubiBoyLite/src/app/cli.odin`)。
+/// TUI関連のオプション(--recent の対話選択等)はRuxBoyにTUIが無いため移植対象外
+/// (`docs/dev/PLAN.md`参照)。
+
+import Core::Slice;
+
+pub const CliDefaultScale: int32 = 4;
+pub const MaxScale: int32 = 8;
+
+pub const Usage: Slice<char8> =
+    "使用法: RuxBoy [options] game.gbc\n\n  -h, --help        コマンドラインの使い方を表示\n  -v, --version     バージョンを表示\n  --scale N         表示倍率 (1-8、9以上は8に丸める、デフォルト 4)\n  --fullscreen      フルスクリーン表示 (--scale は無視される)\n  --shader KIND     シェーダー: nearest, smooth (デフォルト nearest)\n  --recent          最近使ったROMの一覧を表示して終了\n  --headless        ウィンドウを開かずNフレーム実行して終了(検証用)\n  --frames N        --headless で実行するフレーム数(デフォルト 60)\n  --screenshot PATH --headless 終了時にフレームバッファをBMPへ保存\n\nキーボードショートカット(ROM実行中):\n  矢印キー          十字キー\n  Z / X             B / A\n  Enter             Start\n  右Shift           Select\n  F1                現在のスロットへセーブステートを保存\n  F3                現在のスロットからセーブステートを復元\n  Esc               終了\n";
+
+pub struct Options {
+    pub romPath: Slice<char8>;
+    pub hasRomPath: bool;
+    pub scale: int32;
+    pub scaleProvided: bool;
+    pub fullscreen: bool;
+    pub fullscreenProvided: bool;
+    pub smooth: bool;
+    pub smoothProvided: bool;
+    pub recent: bool;
+    pub headless: bool;
+    pub frames: int32;
+    pub screenshotPath: Slice<char8>;
+    pub hasScreenshotPath: bool;
+    pub showHelp: bool;
+    pub showVersion: bool;
+    pub errorMessage: Slice<char8>;
+    pub ok: bool;
+}
+
+pub func DefaultOptions() -> Options {
+    var opts: Options;
+    opts.romPath = "";
+    opts.hasRomPath = false;
+    opts.scale = CliDefaultScale;
+    opts.scaleProvided = false;
+    opts.fullscreen = false;
+    opts.fullscreenProvided = false;
+    opts.smooth = false;
+    opts.smoothProvided = false;
+    opts.recent = false;
+    opts.headless = false;
+    opts.frames = 60;
+    opts.screenshotPath = "";
+    opts.hasScreenshotPath = false;
+    opts.showHelp = false;
+    opts.showVersion = false;
+    opts.errorMessage = "";
+    opts.ok = true;
+    return opts;
+}
+
+/// argv[1:] に相当するスライスの配列を解析する。`args`/`argCount`はCの`argv+1`と
+/// `argc-1`をそのまま渡す想定(呼び出し側で`Posix::CStrToSlice`済みのスライス配列)。
+pub func ParseArgs(args: *Slice<char8>, argCount: uint) -> Options {
+    var opts = DefaultOptions();
+
+    var i: uint = 0;
+    while i < argCount {
+        let arg = *(args + i);
+
+        if SliceEquals(arg, "--scale") {
+            i += 1;
+            if i >= argCount {
+                opts.errorMessage = "--scale には値が必要です";
+                opts.ok = false;
+                return opts;
+            }
+            var n: int32 = 0;
+            if !ParseUintSlice(*(args + i), @n) || n <= 0 {
+                opts.errorMessage = "--scale の値が不正です";
+                opts.ok = false;
+                return opts;
+            }
+            if n > MaxScale { n = MaxScale; }
+            opts.scale = n;
+            opts.scaleProvided = true;
+        } else if SliceEquals(arg, "--fullscreen") {
+            opts.fullscreen = true;
+            opts.fullscreenProvided = true;
+        } else if SliceEquals(arg, "--shader") {
+            i += 1;
+            if i >= argCount {
+                opts.errorMessage = "--shader には値が必要です";
+                opts.ok = false;
+                return opts;
+            }
+            let v = *(args + i);
+            if SliceEquals(v, "nearest") {
+                opts.smooth = false;
+            } else if SliceEquals(v, "smooth") {
+                opts.smooth = true;
+            } else {
+                opts.errorMessage = "--shader の値が不正です(nearest または smooth)";
+                opts.ok = false;
+                return opts;
+            }
+            opts.smoothProvided = true;
+        } else if SliceEquals(arg, "--recent") {
+            opts.recent = true;
+        } else if SliceEquals(arg, "--headless") {
+            opts.headless = true;
+        } else if SliceEquals(arg, "--frames") {
+            i += 1;
+            if i >= argCount {
+                opts.errorMessage = "--frames には値が必要です";
+                opts.ok = false;
+                return opts;
+            }
+            var n: int32 = 0;
+            if !ParseUintSlice(*(args + i), @n) || n <= 0 {
+                opts.errorMessage = "--frames の値が不正です";
+                opts.ok = false;
+                return opts;
+            }
+            opts.frames = n;
+        } else if SliceEquals(arg, "--screenshot") {
+            i += 1;
+            if i >= argCount {
+                opts.errorMessage = "--screenshot には値が必要です";
+                opts.ok = false;
+                return opts;
+            }
+            opts.screenshotPath = *(args + i);
+            opts.hasScreenshotPath = true;
+        } else if SliceEquals(arg, "-h") || SliceEquals(arg, "--help") {
+            opts.showHelp = true;
+        } else if SliceEquals(arg, "-v") || SliceEquals(arg, "--version") {
+            opts.showVersion = true;
+        } else if arg.length > 0 && arg.data[0] == c8'-' {
+            opts.errorMessage = "不明なオプションです";
+            opts.ok = false;
+            return opts;
+        } else {
+            if opts.hasRomPath {
+                opts.errorMessage = "ROM ファイルは 1 個だけ指定できます";
+                opts.ok = false;
+                return opts;
+            }
+            opts.romPath = arg;
+            opts.hasRomPath = true;
+        }
+
+        i += 1;
+    }
+
+    return opts;
+}

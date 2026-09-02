@@ -20,6 +20,10 @@ echo "=== Running BusTest ==="
 (cd "$dir/Tests/Packages/Core/Bus" && "$rux" run ${1:+"$1"})
 echo "BusTest: OK"
 
+echo "=== Running JoypadTest ==="
+(cd "$dir/Tests/Packages/Core/Joypad" && "$rux" run ${1:+"$1"})
+echo "JoypadTest: OK"
+
 echo "=== Running CpuInstrsTest ==="
 (cd "$dir/Tests/Packages/Core/CpuInstrs" && "$rux" run ${1:+"$1"})
 echo "CpuInstrsTest: OK"

@@ -1,38 +1,25 @@
-// RuxBoy — フェーズ0: 最小ウィンドウ表示
-// SDL3 ウィンドウを開いて約 2 秒後に正常終了する。
-// Core エミュレーションはまだ存在しないため、ここでは SDL3 パッケージの動作確認を行う。
+/// RuxBoy — フェーズ8: フロントエンド(CLI/設定/セーブRAM/オーディオ同期ゲームループ)。
+/// フェーズ0の最小ウィンドウ表示スケルトンを置き換える。
 
-import Core::{ Slice, #target };
+import Core::Slice;
+import GbCore::{
+    Cpu, Bus, GbMode,
+    CpuReset, BusInit, BusLoadRom, BusPowerOn, CpuStep,
+    MbcSyncWallClock,
+};
 import Sdl3::{
-    SdlInitVideo,
-    SdlPixelFormatArgb8888, SdlTextureAccessStreaming,
-    SdlScaleModeNearest, SdlLogicalPresentationIntegerScale,
-    SdlEvent, SdlEventQuit, SdlEventKeyDown, SdlScancodeEscape,
-    SDL_SetMainReady, SDL_Init, SDL_Quit,
-    SDL_CreateWindow, SDL_DestroyWindow,
-    SDL_CreateRenderer, SDL_DestroyRenderer,
-    SDL_CreateTexture, SDL_DestroyTexture,
-    SDL_UpdateTexture, SDL_SetTextureScaleMode,
-    SDL_SetRenderLogicalPresentation, SDL_SetRenderDrawColor,
-    SDL_RenderClear, SDL_RenderTexture, SDL_RenderPresent,
-    SDL_PollEvent,
-    SDL_Delay,
+    SdlInitVideo, SdlInitAudio,
+    SdlEvent, SdlEventQuit, SdlEventKeyDown, SdlEventKeyUp,
+    SdlScancodeEscape, SdlScancodeF1, SdlScancodeF3,
+    SDL_SetMainReady, SDL_Init, SDL_Quit, SDL_PollEvent,
 };
 
 const AppTitle: Slice<char8> = "RuxBoy\0";
-const ScreenWidth: int32 = 160;
-const ScreenHeight: int32 = 144;
-const DefaultScale: int32 = 4;
-const MaxFrames: uint32 = 120;   // 約 2 秒 @ 60fps
-
-// libSystem の write(2) で最小出力。Rux/Io は未公開のため自前で持つ。
-#Link("libSystem.B.dylib")
-extern {
-    func write(fd: int32, buf: *opaque, count: uint64) -> int64;
-}
+const FrameTCycles: uint64 = 70224;
+const MaxArgs: uint = 32;
 
 func Print(text: Slice<char8>) {
-    write(1, text.data as *opaque, text.length as uint64);
+    write(1, text.data as *opaque, text.length as uint);
 }
 
 func PrintLine(text: Slice<char8>) {
@@ -41,63 +28,115 @@ func PrintLine(text: Slice<char8>) {
 }
 
 func Main() -> int {
-    PrintLine("RuxBoy v0.1.0 — phase 0 skeleton");
+    var argc: int32 = 0;
+    let argv = Argv(@argc);
 
-    SDL_SetMainReady();
-
-    if !SDL_Init(SdlInitVideo) {
-        PrintLine("SDL_Init failed");
-        return 1;
-    }
-
-    let window = SDL_CreateWindow(AppTitle.data,
-                                  ScreenWidth * DefaultScale,
-                                  ScreenHeight * DefaultScale,
-                                  0);
-    if window == null {
-        PrintLine("SDL_CreateWindow failed");
-        SDL_Quit();
-        return 1;
-    }
-
-    let renderer = SDL_CreateRenderer(window, null);
-    if renderer == null {
-        PrintLine("SDL_CreateRenderer failed");
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
-
-    let texture = SDL_CreateTexture(renderer,
-                                    SdlPixelFormatArgb8888,
-                                    SdlTextureAccessStreaming,
-                                    ScreenWidth,
-                                    ScreenHeight);
-    if texture == null {
-        PrintLine("SDL_CreateTexture failed");
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
-
-    SDL_SetTextureScaleMode(texture, SdlScaleModeNearest);
-    SDL_SetRenderLogicalPresentation(renderer,
-                                     ScreenWidth, ScreenHeight,
-                                     SdlLogicalPresentationIntegerScale);
-
-    // フレームバッファ: 160x144 の単色（GBC グリーン風）
-    var framebuffer: uint32[23040];
-    var i: uint = 0;
-    while i < 23040 {
-        *((@framebuffer[0] as *var uint32) + i) = 0xFF9BBC0F;
+    var argSlices: Slice<char8>[32];
+    var argCount: uint = 0;
+    var i: int32 = 1;
+    while i < argc && argCount < MaxArgs {
+        argSlices[argCount] = CStrToSlice(*(argv + i));
+        argCount += 1;
         i += 1;
     }
 
-    var frame: uint32 = 0;
-    var running = true;
+    let opts = ParseArgs(@argSlices[0], argCount);
 
-    while running && frame < MaxFrames {
+    if opts.showHelp {
+        Print(Usage);
+        return 0;
+    }
+    if opts.showVersion {
+        PrintLine("RuxBoy 0.1.0");
+        return 0;
+    }
+    if !opts.ok {
+        PrintLine(opts.errorMessage);
+        return 2;
+    }
+
+    var config = ConfigLoad();
+    let scale = opts.scaleProvided ? opts.scale : config.scale;
+    let fullscreen = opts.fullscreenProvided ? opts.fullscreen : config.fullscreen;
+    let smooth = opts.smoothProvided ? opts.smooth : config.smooth;
+
+    if opts.recent {
+        RecentPrint();
+        return 0;
+    }
+
+    if !opts.hasRomPath {
+        Print(Usage);
+        return 2;
+    }
+
+    var romPathBuf: PathBuf;
+    PathBufClear(@romPathBuf);
+    PathBufAppend(@romPathBuf, opts.romPath);
+    let romPath = PathBufCStr(@romPathBuf);
+
+    var romLength: uint = 0;
+    let romData = ReadEntireFile(romPath, @romLength);
+    if romData == null {
+        Print("ROMを読み込めません: ");
+        PrintLine(opts.romPath);
+        return 1;
+    }
+
+    var cpu: Cpu;
+    var bus: Bus;
+    BusInit(@bus);
+    if !BusLoadRom(@bus, Slice<uint8> { data: romData, length: romLength }) {
+        PrintLine("ROMヘッダが不正です");
+        free(romData as *var opaque);
+        return 1;
+    }
+    CpuReset(@cpu, bus.mode);
+    BusPowerOn(@bus);
+    MbcSyncWallClock(@bus.cart, WallClockNow() as uint64);
+
+    LoadSaveRam(@bus, opts.romPath);
+    RecentTouch(opts.romPath);
+
+    SDL_SetMainReady();
+    if !SDL_Init(SdlInitVideo) {
+        PrintLine("SDL_Init(Video) に失敗しました");
+        free(romData as *var opaque);
+        return 1;
+    }
+    // オーディオは別呼び出しにする: SDL_Initへ複数フラグをまとめて渡すと
+    // いずれかのサブシステムが失敗しただけで全体がfalseを返す。オーディオ
+    // デバイスが無い環境(CI/一部のヘッドレス環境等)でも映像は表示・動作
+    // できるよう、オーディオ初期化の失敗は非致命的として扱う(以後の
+    // `AudioInit`/`AudioPushFrame`/`AudioPace`はstream==nullを許容する設計)。
+    if !SDL_Init(SdlInitAudio) {
+        PrintLine("SDL_Init(Audio) に失敗しました。音声なしで続行します。");
+    }
+
+    var video = VideoInit(AppTitle.data, scale, fullscreen, smooth, opts.headless);
+    if !VideoIsValid(@video) {
+        PrintLine("ウィンドウ/レンダラの作成に失敗しました");
+        SDL_Quit();
+        free(romData as *var opaque);
+        return 1;
+    }
+
+    var audio = AudioInit();
+
+    var running = true;
+    var frameCount: int32 = 0;
+
+    // バッテリーセーブの保存タイミング(移植元:
+    // `~/dev/_Emu/BubiBoyLite/src/app/main.odin`のsave_pending/save_idle_frames):
+    // 実書き込みからSaveIdleFramesフレーム(約1秒)書き込みが無かったら保存する。
+    // 毎フレーム保存すると128KiB書き込み+renameを60Hzで行うことになるため。
+    const SaveIdleFrames: int32 = 60;
+    var savePending = false;
+    var saveIdleFrames: int32 = 0;
+
+    while running {
+        if opts.headless && frameCount >= opts.frames { break; }
+
         var event: SdlEvent;
         while SDL_PollEvent(@event) {
             if event.kind == SdlEventQuit {
@@ -105,25 +144,69 @@ func Main() -> int {
             } else if event.kind == SdlEventKeyDown {
                 if event.scancode == SdlScancodeEscape {
                     running = false;
+                } else if event.scancode == SdlScancodeF1 && !event.repeat {
+                    SaveStateToFile(@cpu, @bus, opts.romPath);
+                } else if event.scancode == SdlScancodeF3 && !event.repeat {
+                    LoadStateFromFile(@cpu, @bus, opts.romPath);
+                } else {
+                    HandleKeyEvent(@bus, event.scancode, true);
                 }
+            } else if event.kind == SdlEventKeyUp {
+                HandleKeyEvent(@bus, event.scancode, false);
             }
         }
 
-        SDL_UpdateTexture(texture, null, @framebuffer[0] as *opaque, ScreenWidth * 4);
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-        SDL_RenderTexture(renderer, texture, null, null);
-        SDL_RenderPresent(renderer);
+        // bus.cyclesはCPU生T-cycle(倍速中も半分にならない)。フレーム境界は
+        // 実ハードウェア時間(PPU/APUの供給レート)で区切る必要があるため、
+        // 倍速中に半分だけ進むbus.hwCyclesを使う(bus.cyclesを使うと倍速中は
+        // 1回のループが実ハードウェア半フレーム分しか進めず、映像更新も
+        // オーディオ生成量も本来の半分になってしまう)。
+        let frameStart = bus.hwCycles;
+        while bus.hwCycles - frameStart < FrameTCycles {
+            CpuStep(@cpu, @bus);
+        }
 
-        frame += 1;
-        SDL_Delay(16);
+        // MBC3のRTCは呼び出し間の経過秒しか進めない(`MbcSyncWallClock`参照)ため、
+        // 起動時の1回だけでは止まったままになる。毎フレーム供給し続ける。
+        MbcSyncWallClock(@bus.cart, WallClockNow() as uint64);
+
+        VideoPresent(@video, @bus.ppu.framebuffer[0]);
+
+        AudioPushFrame(@audio, @bus.apu, config.volume);
+
+        if bus.cart.ramDirty {
+            savePending = true;
+            saveIdleFrames = 0;
+            bus.cart.ramDirty = false;
+        } else if savePending {
+            saveIdleFrames += 1;
+            if saveIdleFrames >= SaveIdleFrames {
+                SaveSaveRam(@bus, opts.romPath);
+                savePending = false;
+                saveIdleFrames = 0;
+            }
+        }
+
+        if !opts.headless {
+            AudioPace(@audio);
+        }
+
+        frameCount += 1;
     }
 
-    SDL_DestroyTexture(texture);
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
+    if opts.hasScreenshotPath {
+        var shotBuf: PathBuf;
+        PathBufClear(@shotBuf);
+        PathBufAppend(@shotBuf, opts.screenshotPath);
+        VideoScreenshot(@video, PathBufCStr(@shotBuf));
+    }
 
-    PrintLine("done");
+    SaveSaveRam(@bus, opts.romPath);
+
+    AudioDestroy(@audio);
+    VideoDestroy(@video);
+    SDL_Quit();
+    free(romData as *var opaque);
+
     return 0;
 }

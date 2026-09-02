@@ -10,6 +10,13 @@ Description = "Game Boy Color emulator (App layer)"
 License = "MIT"
 
 [Dependencies]
+# Core 以外の標準ライブラリ(Rux/Toml等)を使う場合は、Pathで列挙するだけでなく
+# ルート(このApp)のソースから実際に import しておく必要がある — rux build は
+# 「識別子が最初に解決された場所」を記憶し、以後は依存先のマニフェストが
+# レジストリ形式で同じ識別子を要求してもそれを再利用するため(詳細は
+# docs/dev/PLAN.md 6節、docs/dev/phases/phase-08-frontend.md)。今のところ
+# Config.rux 等はレジストリ非公開下でも簡単に成立する自前のlibSystem externシムで
+# 実装しており、標準ライブラリへの依存を追加していない。
 Core = { Path = "../../external/Rux/Packages/Core" }
 GbCore = { Path = "../Core" }
 Sdl3 = { Path = "../Sdl3" }

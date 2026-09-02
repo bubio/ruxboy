@@ -1,0 +1,120 @@
+/// 最近使ったROMファイルの一覧(recent.txt、MRU順、最大10件)。移植元:
+/// `~/dev/_Emu/BubiBoyLite/src/app/recent.odin`。TUIが無いため対話選択は実装せず、
+/// `--recent`は一覧をstdoutへ表示するのみ(`docs/dev/PLAN.md`参照)。
+
+import Core::Slice;
+
+pub const RecentMaxEntries: uint = 10;
+
+func RecentFilePath(buf: *var PathBuf) -> bool {
+    var dirBuf: PathBuf;
+    let home = GetEnv("HOME\0".data);
+    if home == null { return false; }
+    PathBufClear(@dirBuf);
+    PathBufAppendCStr(@dirBuf, home);
+    PathBufAppend(@dirBuf, "/Library/Application Support/RuxBoy");
+    if !EnsureDirectory(PathBufCStr(@dirBuf)) { return false; }
+
+    PathBufClear(buf);
+    PathBufAppend(buf, PathBufAsSlice(@dirBuf));
+    PathBufAppend(buf, "/recent.txt");
+    return true;
+}
+
+/// 1行1パスの内容を読み込み、`entries`(呼び出し側確保、各要素`PathBuf`)へ格納する。
+/// 戻り値は読み込んだ件数。
+func RecentLoadAll(entries: *var PathBuf, capacity: uint) -> uint {
+    var pathBuf: PathBuf;
+    if !RecentFilePath(@pathBuf) { return 0; }
+    let path = PathBufCStr(@pathBuf);
+    if !PathExists(path) { return 0; }
+
+    var length: uint = 0;
+    let data = ReadEntireFile(path, @length);
+    if data == null { return 0; }
+
+    let bytes = Slice<char8> { data: data as *char8, length: length };
+    var count: uint = 0;
+    var lineStart: uint = 0;
+    var i: uint = 0;
+    while i <= bytes.length && count < capacity {
+        if i == bytes.length || bytes.data[i] == c8'\n' {
+            if i > lineStart {
+                var entry = entries + count;
+                PathBufClear(entry);
+                PathBufAppend(entry, Slice<char8> { data: @bytes.data[lineStart], length: i - lineStart });
+                count += 1;
+            }
+            lineStart = i + 1;
+        }
+        i += 1;
+    }
+
+    free(data as *var opaque);
+    return count;
+}
+
+func RecentSaveAll(entries: *PathBuf, count: uint) {
+    var pathBuf: PathBuf;
+    if !RecentFilePath(@pathBuf) { return; }
+
+    var body: PathBuf;
+    PathBufClear(@body);
+    var i: uint = 0;
+    while i < count {
+        PathBufAppend(@body, PathBufAsSlice(entries + i));
+        PathBufAppendByte(@body, c8'\n');
+        i += 1;
+    }
+
+    var tmpBuf: PathBuf;
+    PathBufClear(@tmpBuf);
+    PathBufAppend(@tmpBuf, PathBufAsSlice(@pathBuf));
+    PathBufAppend(@tmpBuf, ".tmp");
+
+    let bytes = PathBufAsSlice(@body);
+    WriteFileAtomic(PathBufCStr(@pathBuf), PathBufCStr(@tmpBuf), bytes.data as *uint8, bytes.length);
+}
+
+/// `romPath`を最近使った一覧の先頭へ移動する(既存なら重複除去、先頭へ移動、
+/// 最大`RecentMaxEntries`件まで保持)。
+pub func RecentTouch(romPath: Slice<char8>) {
+    var entries: PathBuf[10];
+    let count = RecentLoadAll(@entries[0], RecentMaxEntries);
+
+    var merged: PathBuf[10];
+    PathBufClear(@merged[0]);
+    PathBufAppend(@merged[0], romPath);
+    var mergedCount: uint = 1;
+
+    var i: uint = 0;
+    while i < count && mergedCount < RecentMaxEntries {
+        let existing = PathBufAsSlice(@entries[i]);
+        if !SliceEquals(existing, romPath) {
+            PathBufClear(@merged[mergedCount]);
+            PathBufAppend(@merged[mergedCount], existing);
+            mergedCount += 1;
+        }
+        i += 1;
+    }
+
+    RecentSaveAll(@merged[0], mergedCount);
+}
+
+/// 最近使った一覧をstdoutへ表示する(`--recent`用)。
+pub func RecentPrint() {
+    var entries: PathBuf[10];
+    let count = RecentLoadAll(@entries[0], RecentMaxEntries);
+    if count == 0 {
+        let msg: Slice<char8> = "(最近使ったROMはありません)\n";
+        write(1, msg.data as *opaque, msg.length);
+        return;
+    }
+    var i: uint = 0;
+    while i < count {
+        let bytes = PathBufAsSlice(@entries[i]);
+        write(1, bytes.data as *opaque, bytes.length);
+        write(1, "\n\0".data as *opaque, 1u);
+        i += 1;
+    }
+}

@@ -1,0 +1,36 @@
+/// キーボード入力 → ジョイパッドボタンのマッピング。移植元:
+/// `~/dev/_Emu/BubiBoyLite/src/app/input.odin`(のデフォルトキー配置のみ。
+/// コントローラー対応・キー再割り当てはフェーズ8のスコープ外、`docs/dev/phases/
+/// phase-08-frontend.md`参照)。
+///
+/// デフォルト配置(`~/dev/_Emu/BubiBoyLite/src/app/config.odin`の`default_key_map`と同じ):
+/// 矢印キー=十字キー、Z=B、X=A、Enter=Start、右Shift=Select。
+
+import GbCore::{
+    Bus, JoypadSetButton,
+    JoypadRight, JoypadLeft, JoypadUp, JoypadDown, JoypadA, JoypadB, JoypadSelect, JoypadStart,
+};
+import Sdl3::{
+    SdlScancodeRight, SdlScancodeLeft, SdlScancodeUp, SdlScancodeDown,
+    SdlScancodeZ, SdlScancodeX, SdlScancodeReturn, SdlScancodeRShift,
+};
+
+/// SDLスキャンコードをジョイパッドボタンへ変換する。マッピングが無ければfalse。
+pub func ScancodeToJoypadButton(scancode: uint32, button: *var uint8) -> bool {
+    if scancode == SdlScancodeRight { *button = JoypadRight; return true; }
+    if scancode == SdlScancodeLeft { *button = JoypadLeft; return true; }
+    if scancode == SdlScancodeUp { *button = JoypadUp; return true; }
+    if scancode == SdlScancodeDown { *button = JoypadDown; return true; }
+    if scancode == SdlScancodeZ { *button = JoypadB; return true; }
+    if scancode == SdlScancodeX { *button = JoypadA; return true; }
+    if scancode == SdlScancodeReturn { *button = JoypadStart; return true; }
+    if scancode == SdlScancodeRShift { *button = JoypadSelect; return true; }
+    return false;
+}
+
+pub func HandleKeyEvent(bus: *var Bus, scancode: uint32, pressed: bool) {
+    var button: uint8 = 0;
+    if ScancodeToJoypadButton(scancode, @button) {
+        JoypadSetButton(bus, button, pressed);
+    }
+}
