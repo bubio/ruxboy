@@ -4,14 +4,16 @@ import Core::Slice;
 
 /// OAM のバイト数。
 pub const OamSize: uint = 160;
-/// VRAM のバイト数(DMG、CGBバンク未対応の Phase 1 時点のサイズ)。
-pub const VramSize: uint = 8192;
-/// WRAM のバイト数(バンク切替未対応の Phase 1 時点のサイズ)。
-pub const WramSize: uint = 8192;
+/// VRAM 1バンクあたりのバイト数。
+pub const VramBankSize: uint = 8192;
+/// WRAM 1バンクあたりのバイト数。
+pub const WramBankSize: uint = 4096;
 /// HRAM のバイト数。
 pub const HramSize: uint = 127;
 /// I/O レジスタ領域のバイト数(FF00-FF7F)。
 pub const IoSize: uint = 128;
+/// CGB パレットRAM(BG/OBJ各)のバイト数(8パレット×4色×2バイト)。
+pub const PaletteRamSize: uint = 64;
 
 /// シリアル出力ログの最大バイト数(Blargg 系テストROMの結果文字列用)。
 pub const SerialLogCapacity: uint = 16384;
@@ -20,8 +22,14 @@ pub const SerialLogCapacity: uint = 16384;
 pub struct Bus {
     pub mode: GbMode;
     pub cart: Cartridge;
-    pub vram: uint8[8192];
-    pub wram: uint8[8192];
+    // 2バンクを1次元配列にフラット化(bank*VramBankSize+offset)。
+    // バンク0=DMG互換、バンク1=CGB属性/追加タイルデータ。
+    pub vram: uint8[16384];
+    pub vramBank: uint8; // VBK(FF4F) bit0。DMGモードでは常に0固定(書き込み無視)
+    // 8バンクを1次元配列にフラット化(bank*WramBankSize+offset)。
+    // C000-CFFFはバンク0固定、D000-DFFFはwramBankが選ぶ。
+    pub wram: uint8[32768];
+    pub wramBank: uint8; // SVBK生値(0-7)。「0→1読み替え」はWramActiveBankで解決する
     pub oam: uint8[160];
     pub hram: uint8[127];
     pub io: uint8[128];
@@ -30,6 +38,20 @@ pub struct Bus {
     pub hwCycles: uint64;
     pub doubleSpeed: bool;
     pub speedSwitchPrepared: bool;
+
+    // CGB パレットRAM(FF68-FF6B)
+    pub bgPaletteRam: uint8[64];
+    pub objPaletteRam: uint8[64];
+    pub bcps: uint8;
+    pub ocps: uint8;
+
+    // CGB HDMA/GDMA(FF51-FF55)
+    pub hdmaSource: uint16;
+    pub hdmaDestination: uint16;
+    pub hdmaRemaining: int;
+    pub hdmaActive: bool;
+    pub hdmaAborted: bool;
+    pub hdmaAbortedRemaining: int;
 
     // Timer
     pub divCounter: uint16;
@@ -67,6 +89,16 @@ pub func BusInit(bus: *var Bus) {
     bus.hwCycles = 0;
     bus.doubleSpeed = false;
     bus.speedSwitchPrepared = false;
+    bus.vramBank = 0;
+    bus.wramBank = 0;
+    bus.bcps = 0;
+    bus.ocps = 0;
+    bus.hdmaSource = 0;
+    bus.hdmaDestination = 0;
+    bus.hdmaRemaining = 0;
+    bus.hdmaActive = false;
+    bus.hdmaAborted = false;
+    bus.hdmaAbortedRemaining = 0;
     bus.divCounter = 0;
     bus.tima = 0;
     bus.tma = 0;
@@ -93,7 +125,11 @@ pub func BusInit(bus: *var Bus) {
 /// 未対応種別・サイズ不足は失敗する。
 pub func BusLoadRom(bus: *var Bus, data: Slice<uint8>) -> bool {
     let err = CartridgeInit(@bus.cart, data);
-    return err == CartridgeParseError::None;
+    if err != CartridgeParseError::None {
+        return false;
+    }
+    bus.mode = GbModeFromCgbFlag(bus.cart.info.cgbFlag);
+    return true;
 }
 
 /// ブート ROM 完了直後の IO レジスタ状態を直接セットする(実 BIOS ROM は読み
@@ -108,11 +144,20 @@ pub func BusPowerOn(bus: *var Bus) {
 pub func BusTick(bus: *var Bus, tCycles: int) {
     let cyclesU = tCycles as uint64;
     bus.cycles += cyclesU;
-    bus.hwCycles += cyclesU;
+
+    // T6-6: ダブルスピード中、CPU/Timer/シリアルは2倍速、PPU/APUは等速で進む
+    // (「CPUの1 M-cycleにつき、PPU/APUへは2 T-cycleだけ供給」する方式)。
+    // 逆にするとTimerの音程が半オクターブずれたりゲームが倍速になったりする
+    // 落とし穴があるため、Timer/OAM DMAはCPU側のtCyclesのまま進める。
+    var hwCycles = tCycles;
+    if bus.doubleSpeed {
+        hwCycles = tCycles / 2;
+    }
+    bus.hwCycles += hwCycles as uint64;
 
     TimerTick(bus, tCycles);
-    PpuTick(bus, tCycles);
-    ApuTick(@bus.apu, tCycles); // 等速側(PLAN.md 3節: フェーズ6でダブルスピード対応時はhwCycles相当に直す)
+    PpuTick(bus, hwCycles);
+    ApuTick(@bus.apu, hwCycles);
 
     var mCycles = tCycles / 4;
     while mCycles > 0 {
@@ -203,6 +248,36 @@ func TimerTick(bus: *var Bus, tCycles: int) {
     }
 }
 
+/// VRAM の任意バンクを直接読む(HDMA のソース読み取り用。CPU バス経由ではないため
+/// dmaActive 等の制限を受けない)。
+func VramReadBank(bus: *Bus, bank: uint8, addr: uint16) -> uint8 {
+    let b = (bank & 0x01) as uint;
+    return bus.vram[b * VramBankSize + (addr - 0x8000) as uint];
+}
+
+/// SVBK の「0指定は1扱い」を解決した、D000-DFFF(およびそのエコー)が実際に使う
+/// バンク番号(1-7)を返す。BusPowerOn を呼ばない生の Bus(テストで多用)でも
+/// 常に正しく動くよう、書き込み時ではなくここで解決する。
+func WramActiveBank(bus: *Bus) -> uint8 {
+    let b = bus.wramBank & 0x07;
+    if b == 0 { return 1; }
+    return b;
+}
+
+/// CPU アドレス(C000-DFFF、または E000-FDFFのエコー)を実バンク番号とバンク内
+/// オフセットへ変換する。エコーRAMはC000-DDFFだけをミラーする。
+func WramLocate(bus: *Bus, addr: uint16, bank: *var uint8, offset: *var uint16) {
+    var a = addr;
+    if a >= 0xE000 { a -= 0x2000; }
+    if a <= 0xCFFF {
+        *bank = 0;
+        *offset = a - 0xC000;
+        return;
+    }
+    *bank = WramActiveBank(bus);
+    *offset = a - 0xD000;
+}
+
 /// CPU からの読み出し。OAM DMA 中は OAM 領域(FE00-FE9F)読み出しが 0xFF に
 /// 化ける(DMA自身の内部読み出しはこの制限を受けない `BusReadRaw` を直接使う)。
 pub func BusRead(bus: *Bus, addr: uint16) -> uint8 {
@@ -217,13 +292,14 @@ pub func BusReadRaw(bus: *Bus, addr: uint16) -> uint8 {
     if addr <= 0x7FFF {
         return MbcRead(@bus.cart, addr);
     } else if addr <= 0x9FFF {
-        return bus.vram[(addr - 0x8000) as uint];
+        return VramReadBank(bus, bus.vramBank, addr);
     } else if addr <= 0xBFFF {
         return MbcRead(@bus.cart, addr);
-    } else if addr <= 0xDFFF {
-        return bus.wram[(addr - 0xC000) as uint];
     } else if addr <= 0xFDFF {
-        return bus.wram[(addr - 0xE000) as uint]; // Echo RAM
+        var bank: uint8 = 0;
+        var offset: uint16 = 0;
+        WramLocate(bus, addr, @bank, @offset);
+        return bus.wram[(bank as uint) * WramBankSize + (offset as uint)];
     } else if addr <= 0xFE9F {
         return bus.oam[(addr - 0xFE00) as uint];
     } else if addr <= 0xFEFF {
@@ -246,13 +322,15 @@ pub func BusWrite(bus: *var Bus, addr: uint16, value: uint8) {
     if addr <= 0x7FFF {
         MbcWrite(@bus.cart, addr, value); // ROM領域: MBCのバンク切替レジスタ
     } else if addr <= 0x9FFF {
-        bus.vram[(addr - 0x8000) as uint] = value;
+        let b = (bus.vramBank & 0x01) as uint;
+        bus.vram[b * VramBankSize + (addr - 0x8000) as uint] = value;
     } else if addr <= 0xBFFF {
         MbcWrite(@bus.cart, addr, value);
-    } else if addr <= 0xDFFF {
-        bus.wram[(addr - 0xC000) as uint] = value;
     } else if addr <= 0xFDFF {
-        bus.wram[(addr - 0xE000) as uint] = value;
+        var bank: uint8 = 0;
+        var offset: uint16 = 0;
+        WramLocate(bus, addr, @bank, @offset);
+        bus.wram[(bank as uint) * WramBankSize + (offset as uint)] = value;
     } else if addr <= 0xFE9F {
         bus.oam[(addr - 0xFE00) as uint] = value;
     } else if addr <= 0xFEFF {
@@ -285,19 +363,75 @@ func BusIoRead(bus: *Bus, addr: uint16) -> uint8 {
         return PpuRead(bus, addr);
     } else if (addr >= 0xFF10 && addr <= 0xFF26) || (addr >= 0xFF30 && addr <= 0xFF3F) {
         return ApuReadRegister(@bus.apu, addr);
+    } else if addr == 0xFF4D {
+        // KEY1。CGB専用。bit7=現在の速度(読み専用)、bit0=切替準備(読み書き可)、
+        // 残りは常に1で読める未使用bit。
+        if bus.mode != GbMode::Cgb { return 0xFF; }
+        var v: uint8 = 0x7E;
+        if bus.doubleSpeed { v = v | 0x80; }
+        if bus.speedSwitchPrepared { v = v | 0x01; }
+        return v;
+    } else if addr == 0xFF4F {
+        // VBK。CGB専用。DMGモードでは他の未実装レジスタと同じく0xFFを返す。
+        if bus.mode != GbMode::Cgb { return 0xFF; }
+        return 0xFE | bus.vramBank;
+    } else if addr >= 0xFF51 && addr <= 0xFF54 {
+        // HDMA1-4は書き込み専用として扱う(読み出しは他の未実装レジスタと同じ0xFF)。
+        return 0xFF;
+    } else if addr == 0xFF55 {
+        if bus.mode != GbMode::Cgb { return 0xFF; }
+        if bus.hdmaActive {
+            // 落とし穴: bit7は「非アクティブ」を表すので進行中は0のまま、
+            // 下位7bitに残りブロック-1。
+            return (bus.hdmaRemaining - 1) as uint8;
+        }
+        if bus.hdmaAborted {
+            return ((bus.hdmaAbortedRemaining - 1) as uint8) | 0x80;
+        }
+        return 0xFF; // 非アクティブ(GDMA完了後・未使用時)
+    } else if addr == 0xFF68 {
+        if bus.mode != GbMode::Cgb { return 0xFF; }
+        return bus.bcps;
+    } else if addr == 0xFF69 {
+        // 落とし穴: 読み出しではオートインクリメントしない(書き込み時のみ)。
+        if bus.mode != GbMode::Cgb { return 0xFF; }
+        return bus.bgPaletteRam[(bus.bcps & 0x3F) as uint];
+    } else if addr == 0xFF6A {
+        if bus.mode != GbMode::Cgb { return 0xFF; }
+        return bus.ocps;
+    } else if addr == 0xFF6B {
+        if bus.mode != GbMode::Cgb { return 0xFF; }
+        return bus.objPaletteRam[(bus.ocps & 0x3F) as uint];
+    } else if addr == 0xFF70 {
+        if bus.mode != GbMode::Cgb { return 0xFF; }
+        return 0xF8 | WramActiveBank(bus); // 0指定は1扱いなので読み出しも解決済みバンクを返す
     }
     return 0xFF;
+}
+
+/// BCPS/OCPSのオートインクリメントを適用した新しいインデックスレジスタ値を返す。
+/// bit7(オートインクリメント有効)が0なら何もしない。bit6は常に1で読める未使用bit
+/// として保持し、インデックス(bit5-0)だけ+1(64でラップ)する。
+func PaletteIndexIncrement(indexReg: uint8) -> uint8 {
+    if (indexReg & 0x80) == 0 { return indexReg; }
+    return (indexReg & 0x80) | 0x40 | ((indexReg + 1) & 0x3F);
+}
+
+/// DIV(FF04)書き込みの共通処理(DIVリセット)。CGBのSTOPによるダブルスピード
+/// 切替後のDIVリセットからも呼ばれる(Pan Docs "CGB Registers: KEY1")。
+pub func TimerWriteDiv(bus: *var Bus) {
+    let oldSignal = TimerSignal(bus.divCounter, bus.tac);
+    ApuNotifyDivWrite(@bus.apu, bus.divCounter); // divCounterをリセットする前(旧値を見る)に呼ぶ
+    bus.divCounter = 0;
+    if oldSignal {
+        TimerIncrementTima(bus);
+    }
 }
 
 /// I/O レジスタ領域(FF00-FF7F)の書き込みをレジスタごとに振り分ける。
 func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
     if addr == 0xFF04 {
-        let oldSignal = TimerSignal(bus.divCounter, bus.tac);
-        ApuNotifyDivWrite(@bus.apu, bus.divCounter); // divCounterをリセットする前(旧値を見る)に呼ぶ
-        bus.divCounter = 0;
-        if oldSignal {
-            TimerIncrementTima(bus);
-        }
+        TimerWriteDiv(bus);
     } else if addr == 0xFF05 {
         if !bus.timerReloadJustHappened {
             bus.timerReloadPending = 0;
@@ -329,8 +463,128 @@ func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
         PpuWrite(bus, addr, value);
     } else if (addr >= 0xFF10 && addr <= 0xFF26) || (addr >= 0xFF30 && addr <= 0xFF3F) {
         ApuWriteRegister(@bus.apu, addr, value);
+    } else if addr == 0xFF4D {
+        // bit0(切替準備)のみ書き込み可能。実際の速度反転はSTOP実行時(Cpu.rux)に行う。
+        if bus.mode == GbMode::Cgb {
+            bus.speedSwitchPrepared = (value & 0x01) != 0;
+        }
+    } else if addr == 0xFF4F {
+        // 落とし穴: DMGモードではVBK書き込みを無視しバンク0固定のままにする。
+        if bus.mode == GbMode::Cgb {
+            bus.vramBank = value & 0x01;
+        }
+    } else if addr == 0xFF51 {
+        if bus.mode == GbMode::Cgb {
+            bus.hdmaSource = ((value as uint16) << 8) | (bus.hdmaSource & 0x00F0);
+        }
+    } else if addr == 0xFF52 {
+        // 落とし穴: 下位4bitは無視(常に0)。
+        if bus.mode == GbMode::Cgb {
+            bus.hdmaSource = (bus.hdmaSource & 0xFF00) | ((value & 0xF0) as uint16);
+        }
+    } else if addr == 0xFF53 {
+        // 落とし穴: 上位3bitはマスクされ常に0x8000起点(VRAM内)になる。
+        if bus.mode == GbMode::Cgb {
+            bus.hdmaDestination = 0x8000 | (((value & 0x1F) as uint16) << 8) | (bus.hdmaDestination & 0x00F0);
+        }
+    } else if addr == 0xFF54 {
+        // 落とし穴: 下位4bitは無視(常に0)。
+        if bus.mode == GbMode::Cgb {
+            bus.hdmaDestination = 0x8000 | (bus.hdmaDestination & 0x1F00) | ((value & 0xF0) as uint16);
+        }
+    } else if addr == 0xFF55 {
+        if bus.mode == GbMode::Cgb {
+            HdmaStartOrCancel(bus, value);
+        }
+    } else if addr == 0xFF68 {
+        if bus.mode == GbMode::Cgb {
+            bus.bcps = value | 0x40; // bit6は常に1で読める
+        }
+    } else if addr == 0xFF69 {
+        if bus.mode == GbMode::Cgb {
+            bus.bgPaletteRam[(bus.bcps & 0x3F) as uint] = value;
+            bus.bcps = PaletteIndexIncrement(bus.bcps); // 落とし穴: 書き込み時のみオートインクリメント
+        }
+    } else if addr == 0xFF6A {
+        if bus.mode == GbMode::Cgb {
+            bus.ocps = value | 0x40;
+        }
+    } else if addr == 0xFF6B {
+        if bus.mode == GbMode::Cgb {
+            bus.objPaletteRam[(bus.ocps & 0x3F) as uint] = value;
+            bus.ocps = PaletteIndexIncrement(bus.ocps);
+        }
+    } else if addr == 0xFF70 {
+        // 落とし穴: DMGモードではSVBK書き込みを無視する。
+        if bus.mode == GbMode::Cgb {
+            bus.wramBank = value & 0x07; // 0→1読み替えは読み出し/アドレス解決側(WramActiveBank)で行う
+        }
     } else {
         bus.io[(addr - 0xFF00) as uint] = value;
+    }
+}
+
+// --- CGB HDMA / GDMA ---
+
+/// 現在の hdmaSource/hdmaDestination から16バイトをVRAM(現在のVBKバンク)へコピーする。
+/// 宛先は0x8000起点のVRAM境界を超えず折り返す。
+func HdmaCopyBlock(bus: *var Bus) {
+    let destBase = (bus.hdmaDestination - 0x8000) as uint;
+    let b = (bus.vramBank & 0x01) as uint;
+    var offset: uint = 0;
+    while offset < 16 {
+        let value = BusReadRaw(bus, bus.hdmaSource + (offset as uint16));
+        bus.vram[b * VramBankSize + destBase + offset] = value;
+        offset += 1;
+    }
+    bus.hdmaSource += 0x10;
+    bus.hdmaDestination = 0x8000 | ((bus.hdmaDestination + 0x10 - 0x8000) & 0x1FF0);
+}
+
+/// GDMA(HDMA5 bit7=0)を実行する: (n+1)*16バイトを即座に全転送する。
+/// 転送1ブロックあたり8 T-cycleのBusTickで「CPU停止時間も加算」を表現する。
+func HdmaRunGeneral(bus: *var Bus) {
+    // 先に非アクティブにしておく(BusTick経由でPpuTickのHBlankフックが呼ばれても
+    // 二重に転送を進めないようにするため)。
+    bus.hdmaActive = false;
+    while bus.hdmaRemaining > 0 {
+        HdmaCopyBlock(bus);
+        bus.hdmaRemaining -= 1;
+        BusTick(bus, 8);
+    }
+}
+
+/// HDMA5(FF55)への書き込みを処理する。進行中のHDMA(HBlank毎転送)にbit7=0を
+/// 書くと中断し、残りブロック数を記録して以後のFF55読み出しに反映する。それ以外は
+/// 新しい転送を開始する: bit7=1ならHDMA(HBlank待ち)、bit7=0ならGDMA(即時全転送)。
+func HdmaStartOrCancel(bus: *var Bus, value: uint8) {
+    if bus.hdmaActive && (value & 0x80) == 0 {
+        bus.hdmaAborted = true;
+        bus.hdmaAbortedRemaining = bus.hdmaRemaining;
+        bus.hdmaActive = false;
+        return;
+    }
+    let length = (((value & 0x7F) as int) + 1);
+    bus.hdmaRemaining = length;
+    bus.hdmaAborted = false;
+    if (value & 0x80) != 0 {
+        bus.hdmaActive = true; // HDMA: HBlank毎にPpuTick側から1ブロックずつ進む
+    } else {
+        bus.hdmaActive = false;
+        HdmaRunGeneral(bus); // GDMA: ここで即時に全ブロック転送する
+    }
+}
+
+/// PPU が Draw→HBlank へ遷移した瞬間に呼ぶ HDMA フック(HBlank毎に16バイト進む)。
+/// LCD off中はPpuTick自体が早期returnするため、この関数に到達すること自体がない
+/// (「LCD off中のHDMAは進まない」は自然に満たされる)。
+pub func HdmaOnHblank(bus: *var Bus) {
+    if bus.mode == GbMode::Cgb && bus.hdmaActive {
+        HdmaCopyBlock(bus);
+        bus.hdmaRemaining -= 1;
+        if bus.hdmaRemaining <= 0 {
+            bus.hdmaActive = false;
+        }
     }
 }
 

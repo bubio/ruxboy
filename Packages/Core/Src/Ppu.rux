@@ -63,6 +63,17 @@ pub const OamAttrXFlip: uint8 = 0x20;
 /// OAM属性 bit4: パレット選択(0=OBP0, 1=OBP1)。
 pub const OamAttrPalette: uint8 = 0x10;
 
+/// CGB BG属性/OAM属性 共通 bit7: BGをOBJより前面にする(BG-to-OBJ優先度表で使用)。
+pub const CgbAttrBgPriority: uint8 = 0x80;
+/// CGB BG属性/OAM属性 共通 bit6: 垂直フリップ。
+pub const CgbAttrYFlip: uint8 = 0x40;
+/// CGB BG属性/OAM属性 共通 bit5: 水平フリップ。
+pub const CgbAttrXFlip: uint8 = 0x20;
+/// CGB BG属性/OAM属性 共通 bit3: タイルデータの読み出し元VRAMバンク(0/1)。
+pub const CgbAttrBank: uint8 = 0x08;
+/// CGB BG属性/OAM属性 共通 bit2-0: パレット番号(0-7)。
+pub const CgbAttrPaletteMask: uint8 = 0x07;
+
 /// PPU モード0(HBlank)。STAT bit1-0 と同じ数値。
 pub const ModeHBlank: uint8 = 0;
 /// PPU モード1(VBlank)。
@@ -117,6 +128,8 @@ pub struct Ppu {
 
     pub framebuffer: uint32[23040]; // 160x144, ARGB, 行優先
     pub bgColorIndex: uint8[160]; // 直近描画したラインのカラー番号(パレット適用前)
+    pub bgCgbPalette: uint8[160]; // CGB BG属性bit2-0(パレット番号)。DMGでは常に0
+    pub bgCgbPriority: bool[160]; // CGB BG属性bit7(BG-to-OBJ優先)。DMGでは常にfalse
 }
 
 /// STAT bit2(LYC==LY)を LY/LYC の現在値から再計算する。
@@ -305,29 +318,91 @@ func BgTileDataAddr(lcdc: uint8, tileIndex: uint8, rowInTile: int) -> uint16 {
     return (0x9000 + signedIndex * 16 + rowInTile * 2) as uint16;
 }
 
-/// VRAM上の2bppタイルデータ1行から指定列のカラー番号(0-3、パレット適用前)を
-/// 取り出す。bit7が左端ピクセル。
-func TilePixelColorNumber(bus: *Bus, tileAddr: uint16, colInTile: int) -> uint8 {
-    let low = bus.vram[(tileAddr - 0x8000) as uint];
-    let high = bus.vram[(tileAddr - 0x8000 + 1) as uint];
+/// VRAM上(指定バンク)の2bppタイルデータ1行から指定列のカラー番号(0-3、パレット
+/// 適用前)を取り出す。bit7が左端ピクセル。CGBのBG/ウィンドウ/OBJいずれも属性
+/// bit3(またはOAM属性bit3)でバンク0/1を選ぶ。
+func TilePixelColorNumber(bus: *Bus, bank: uint8, tileAddr: uint16, colInTile: int) -> uint8 {
+    let low = VramReadBank(bus, bank, tileAddr);
+    let high = VramReadBank(bus, bank, tileAddr + 1);
     let shift = (7 - colInTile) as uint;
     let lowBit = (low >> shift) & 0x01;
     let highBit = (high >> shift) & 0x01;
     return lowBit | (highBit << 1);
 }
 
-/// タイルマップ上の座標(sourceX, sourceY)が指すタイルのカラー番号を解決する。
-func TileMapPixelColorNumber(bus: *Bus, mapBase: uint16, lcdc: uint8, sourceX: int, sourceY: int) -> uint8 {
+/// タイルマップ1ピクセル分の解決結果。DMGモードでは palette=0・priority=false 固定
+/// (属性バイトはCGBモードのときだけバンク1から読む)。
+pub struct BgPixel {
+    pub colorNumber: uint8;
+    pub palette: uint8;
+    pub priority: bool;
+}
+
+/// タイルマップ(BG/ウィンドウ共通の形式)上の座標(sourceX, sourceY)が指すタイル
+/// のピクセルを解決する。CGBモードでは「バンク1のタイルマップと同アドレス」
+/// (落とし穴)から属性バイトを読み、Y/Xフリップとタイルデータバンク選択に反映する。
+func TileMapPixel(bus: *Bus, mapBase: uint16, lcdc: uint8, sourceX: int, sourceY: int) -> BgPixel {
     let tileCol = sourceX / 8;
     let tileRow = sourceY / 8;
     let tileMapAddr = mapBase + ((tileRow * 32 + tileCol) as uint16);
-    let tileIndex = bus.vram[(tileMapAddr - 0x8000) as uint];
+    let tileIndex = VramReadBank(bus, 0, tileMapAddr);
 
-    let rowInTile = sourceY % 8;
-    let colInTile = sourceX % 8;
+    var attr: uint8 = 0;
+    if bus.mode == GbMode::Cgb {
+        attr = VramReadBank(bus, 1, tileMapAddr);
+    }
+
+    var rowInTile = sourceY % 8;
+    var colInTile = sourceX % 8;
+    if (attr & CgbAttrYFlip) != 0 {
+        rowInTile = 7 - rowInTile;
+    }
+    if (attr & CgbAttrXFlip) != 0 {
+        colInTile = 7 - colInTile;
+    }
+
+    var tileBank: uint8 = 0;
+    if (attr & CgbAttrBank) != 0 {
+        tileBank = 1;
+    }
 
     let tileAddr = BgTileDataAddr(lcdc, tileIndex, rowInTile);
-    return TilePixelColorNumber(bus, tileAddr, colInTile);
+    let colorNumber = TilePixelColorNumber(bus, tileBank, tileAddr, colInTile);
+
+    return BgPixel {
+        colorNumber: colorNumber,
+        palette: attr & CgbAttrPaletteMask,
+        priority: (attr & CgbAttrBgPriority) != 0
+    };
+}
+
+/// CGBパレットRAMの1色(リトルエンディアン2バイト、bit4-0=R, 9-5=G, 14-10=B)を
+/// ARGBへ変換する(architecture.md固定の変換式 `(c<<3)|(c>>2)`)。
+func Rgb555ToArgb(raw: uint16) -> uint32 {
+    let r = (raw & 0x1F) as uint32;
+    let g = ((raw >> 5) & 0x1F) as uint32;
+    let b = ((raw >> 10) & 0x1F) as uint32;
+    let rr = (r << 3) | (r >> 2);
+    let gg = (g << 3) | (g >> 2);
+    let bb = (b << 3) | (b >> 2);
+    return 0xFF000000 | (rr << 16) | (gg << 8) | bb;
+}
+
+/// パレットRAM(BG/OBJいずれか)からpalette番号(0-7)・colorNumber(0-3)の色を
+/// 引きARGBへ変換する。1色=2バイト、パレット1本=8バイト(4色×2バイト)。
+func CgbPaletteColor(bus: *Bus, useObjPalette: bool, palette: uint8, colorNumber: uint8) -> uint32 {
+    let index = ((palette & 0x07) as uint) * 8 + ((colorNumber & 0x03) as uint) * 2;
+    var low: uint8 = 0;
+    var high: uint8 = 0;
+    if useObjPalette {
+        low = bus.objPaletteRam[index];
+        high = bus.objPaletteRam[index + 1];
+    } else {
+        low = bus.bgPaletteRam[index];
+        high = bus.bgPaletteRam[index + 1];
+    }
+    let raw = (low as uint16) | ((high as uint16) << 8);
+    return Rgb555ToArgb(raw);
 }
 
 /// 1ライン分をframebufferに描く(BG→ウィンドウ→スプライトの順)。
@@ -340,11 +415,16 @@ func PpuRenderScanline(bus: *var Bus) {
     }
     let lineStart = (ly * 160) as uint;
 
-    if (bus.ppu.lcdc & LcdcBitBgEnable) == 0 {
+    // 落とし穴(T6-5): CGBモードではLCDC bit0の意味が変わり「BG/ウィンドウの
+    // マスタープライオリティ」になる(0でもBG/ウィンドウは通常どおり描画され続け、
+    // OBJが常にBGより前面になるだけ。Pan Docs "LCDC.0")。白一色化はDMGモード限定。
+    if bus.mode != GbMode::Cgb && (bus.ppu.lcdc & LcdcBitBgEnable) == 0 {
         var x: uint = 0;
         while x < 160 {
             bus.ppu.framebuffer[lineStart + x] = DmgShade0;
             bus.ppu.bgColorIndex[x] = 0;
+            bus.ppu.bgCgbPalette[x] = 0;
+            bus.ppu.bgCgbPriority[x] = false;
             x += 1;
         }
         PpuRenderSprites(bus, lineStart);
@@ -367,18 +447,24 @@ func PpuRenderScanline(bus: *var Bus) {
 
     var x: uint = 0;
     while x < 160 {
-        var colorNumber: uint8 = 0;
+        var pixel: BgPixel;
         if winVisibleThisLine && (x as int) >= wxMinus7 {
-            colorNumber = TileMapPixelColorNumber(bus, winMapBase, bus.ppu.lcdc, (x as int) - wxMinus7, bus.ppu.windowLine);
+            pixel = TileMapPixel(bus, winMapBase, bus.ppu.lcdc, (x as int) - wxMinus7, bus.ppu.windowLine);
         } else {
             let sourceX = ((x as int) + (bus.ppu.scx as int)) & 0xFF;
             let sourceY = (ly + (bus.ppu.scy as int)) & 0xFF;
-            colorNumber = TileMapPixelColorNumber(bus, bgMapBase, bus.ppu.lcdc, sourceX, sourceY);
+            pixel = TileMapPixel(bus, bgMapBase, bus.ppu.lcdc, sourceX, sourceY);
         }
 
-        bus.ppu.bgColorIndex[x] = colorNumber;
-        let shade = (bus.ppu.bgp >> (colorNumber * 2)) & 0x03;
-        bus.ppu.framebuffer[lineStart + x] = DmgShade(shade);
+        bus.ppu.bgColorIndex[x] = pixel.colorNumber;
+        bus.ppu.bgCgbPalette[x] = pixel.palette;
+        bus.ppu.bgCgbPriority[x] = pixel.priority;
+        if bus.mode == GbMode::Cgb {
+            bus.ppu.framebuffer[lineStart + x] = CgbPaletteColor(bus, false, pixel.palette, pixel.colorNumber);
+        } else {
+            let shade = (bus.ppu.bgp >> (pixel.colorNumber * 2)) & 0x03;
+            bus.ppu.framebuffer[lineStart + x] = DmgShade(shade);
+        }
         x += 1;
     }
 
@@ -387,6 +473,20 @@ func PpuRenderScanline(bus: *var Bus) {
     }
 
     PpuRenderSprites(bus, lineStart);
+}
+
+/// CGBのBG-to-OBJ優先度表(Pan Docs "BG-to-OBJ Priority in CGB Mode")。
+/// trueならOBJを描画してよい、falseならBGを残す(OBJ側のcolorNumber=0=透明は
+/// 呼び出し側で既に除外済みの前提)。優先順: (1) LCDC bit0=0(マスタープライオリティ
+/// 無効)ならOBJが常に勝つ。(2) BGのcolorNumberが0(透明)ならOBJが勝つ。
+/// (3) BG属性bit7(bgPriority)が立っていればBGが勝つ。(4) OAM属性bit7(oamPriority)
+/// が立っていればBGが勝つ。(5) それ以外はOBJが勝つ。
+func CgbObjWinsOverBg(ppu: *Ppu, bgColorNumber: uint8, bgPriority: bool, oamPriority: bool) -> bool {
+    if (ppu.lcdc & LcdcBitBgEnable) == 0 { return true; }
+    if bgColorNumber == 0 { return true; }
+    if bgPriority { return false; }
+    if oamPriority { return false; }
+    return true;
 }
 
 /// このラインのスプライト(8x8/8x16)を優先度込みで描画する。
@@ -432,7 +532,10 @@ func PpuRenderSprites(bus: *var Bus, lineStart: uint) {
         return;
     }
 
-    // 挿入ソート: X優先、同Xなら OAM index 優先(小さい方が勝つ)
+    // 挿入ソート: X優先、同Xなら OAM index 優先(小さい方が勝つ)。
+    // 落とし穴(T6-5): CGBはX座標に関係なくOAM順(先頭が勝つ)なのでソートしない
+    // (上の収集ループが既にOAM index0からの走査順で詰めている)。
+    if bus.mode != GbMode::Cgb {
     var j: int = 1;
     while j < count {
         let curIndex = spriteIndex[j];
@@ -455,6 +558,7 @@ func PpuRenderSprites(bus: *var Bus, lineStart: uint) {
         spriteTile[k + 1] = curTile;
         spriteAttr[k + 1] = curAttr;
         j += 1;
+    }
     }
 
     var pixelOwned: bool[160];
@@ -483,6 +587,13 @@ func PpuRenderSprites(bus: *var Bus, lineStart: uint) {
         let rowInTile = yInSprite % 8;
         let tileAddr = (0x8000 + ((tileIndex + tileOffset) as int) * 16 + rowInTile * 2) as uint16;
 
+        // CGBのOAM属性bit3はタイルデータの読み出し元VRAMバンクを選ぶ(DMGでは無視、
+        // バンク0固定)。
+        var spriteTileBank: uint8 = 0;
+        if bus.mode == GbMode::Cgb && (attr & CgbAttrBank) != 0 {
+            spriteTileBank = 1;
+        }
+
         var col: int = 0;
         while col < 8 {
             let x = spriteX[s] + col;
@@ -491,22 +602,31 @@ func PpuRenderSprites(bus: *var Bus, lineStart: uint) {
                 if (attr & OamAttrXFlip) != 0 {
                     sourceCol = 7 - col;
                 }
-                let colorNumber = TilePixelColorNumber(bus, tileAddr, sourceCol);
+                let colorNumber = TilePixelColorNumber(bus, spriteTileBank, tileAddr, sourceCol);
                 if colorNumber != 0 {
                     pixelOwned[x as uint] = true;
 
                     var draw = true;
-                    if (attr & OamAttrBgPriority) != 0 && bus.ppu.bgColorIndex[x as uint] != 0 {
+                    if bus.mode == GbMode::Cgb {
+                        if !CgbObjWinsOverBg(@bus.ppu, bus.ppu.bgColorIndex[x as uint], bus.ppu.bgCgbPriority[x as uint], (attr & OamAttrBgPriority) != 0) {
+                            draw = false;
+                        }
+                    } else if (attr & OamAttrBgPriority) != 0 && bus.ppu.bgColorIndex[x as uint] != 0 {
                         draw = false;
                     }
 
                     if draw {
-                        var palette = bus.ppu.obp0;
-                        if (attr & OamAttrPalette) != 0 {
-                            palette = bus.ppu.obp1;
+                        if bus.mode == GbMode::Cgb {
+                            let cgbPalette = attr & CgbAttrPaletteMask;
+                            bus.ppu.framebuffer[lineStart + (x as uint)] = CgbPaletteColor(bus, true, cgbPalette, colorNumber);
+                        } else {
+                            var palette = bus.ppu.obp0;
+                            if (attr & OamAttrPalette) != 0 {
+                                palette = bus.ppu.obp1;
+                            }
+                            let shade = (palette >> (colorNumber * 2)) & 0x03;
+                            bus.ppu.framebuffer[lineStart + (x as uint)] = DmgShade(shade);
                         }
-                        let shade = (palette >> (colorNumber * 2)) & 0x03;
-                        bus.ppu.framebuffer[lineStart + (x as uint)] = DmgShade(shade);
                     }
                 }
             }
@@ -543,6 +663,7 @@ pub func PpuTick(bus: *var Bus, tCycles: int) {
         }
         if prevMode == ModeDraw && bus.ppu.mode == ModeHBlank {
             PpuRenderScanline(bus);
+            HdmaOnHblank(bus); // T6-7: HDMA(HBlank毎16バイト転送)のフック
         }
 
         PpuUpdateStatIrq(bus);

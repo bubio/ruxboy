@@ -157,4 +157,20 @@ else
 	fi
 fi
 
+# cgb-acid2 (フェーズ6): mattcurrie/cgb-acid2 のリリース資産から直接取得する。
+CGB_ACID2_ROM_URL="https://github.com/mattcurrie/cgb-acid2/releases/download/v1.1/cgb-acid2.gbc"
+CGB_ACID2_ROM_PATH="$ROMS_DIR/acid2/cgb-acid2.gb"
+if [ -f "$CGB_ACID2_ROM_PATH" ]; then
+	echo "fetch_test_roms.sh: 取得済み、スキップ: $CGB_ACID2_ROM_PATH"
+else
+	echo "fetch_test_roms.sh: 取得中: $CGB_ACID2_ROM_URL"
+	tmp_path="$CGB_ACID2_ROM_PATH.tmp"
+	if curl -fsSL --retry 3 --retry-delay 2 -o "$tmp_path" "$CGB_ACID2_ROM_URL"; then
+		mv "$tmp_path" "$CGB_ACID2_ROM_PATH"
+	else
+		rm -f "$tmp_path"
+		echo "fetch_test_roms.sh: 取得失敗: $CGB_ACID2_ROM_URL" >&2
+	fi
+fi
+
 echo "fetch_test_roms.sh: 完了。配置先: $ROMS_DIR"

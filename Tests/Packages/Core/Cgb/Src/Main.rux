@@ -1,0 +1,344 @@
+import GbCore::{
+    Bus, Cpu, GbMode, CgbFlag,
+    GbModeFromCgbFlag,
+    BusInit, BusPowerOn, BusRead, BusWrite, BusTick,
+    CpuReset, CpuStep
+};
+
+func Main() -> int {
+    // --- T6-1: モード判定 ---
+    if GbModeFromCgbFlag(CgbFlag::DmgOnly) != GbMode::Dmg { return 1; }
+    if GbModeFromCgbFlag(CgbFlag::CgbEnhanced) != GbMode::Cgb { return 2; }
+    if GbModeFromCgbFlag(CgbFlag::CgbOnly) != GbMode::Cgb { return 3; }
+
+    // --- T6-2: VRAM バンク(VBK, FF4F) ---
+    var bus: Bus;
+    BusInit(@bus);
+    bus.mode = GbMode::Cgb;
+
+    BusWrite(@bus, 0xFF4F, 0x00);
+    BusWrite(@bus, 0x8000, 0x11);
+    BusWrite(@bus, 0xFF4F, 0x01);
+    BusWrite(@bus, 0x8000, 0x22);
+    if BusRead(@bus, 0xFF4F) != 0xFF { return 10; } // 0xFE|1
+    BusWrite(@bus, 0xFF4F, 0x00);
+    if BusRead(@bus, 0x8000) != 0x11 { return 11; }
+    BusWrite(@bus, 0xFF4F, 0x01);
+    if BusRead(@bus, 0x8000) != 0x22 { return 12; }
+
+    // DMGモードではVBK書き込みは無視される(バンク0固定)。
+    var busDmg: Bus;
+    BusInit(@busDmg);
+    BusWrite(@busDmg, 0x8000, 0xAA);
+    BusWrite(@busDmg, 0xFF4F, 0x01); // 無視されるはず
+    if BusRead(@busDmg, 0xFF4F) != 0xFF { return 13; }
+    if BusRead(@busDmg, 0x8000) != 0xAA { return 14; } // バンク0のまま
+
+    // --- T6-3: WRAM バンク(SVBK, FF70) ---
+    var bus2: Bus;
+    BusInit(@bus2);
+    bus2.mode = GbMode::Cgb;
+
+    // SVBK=0 は 1 扱い(読み出しも解決済みバンクを返す)。
+    if BusRead(@bus2, 0xFF70) != (0xF8 | 0x01) { return 20; }
+
+    BusWrite(@bus2, 0xFF70, 0x02);
+    BusWrite(@bus2, 0xD000, 0x55);
+    BusWrite(@bus2, 0xFF70, 0x03);
+    BusWrite(@bus2, 0xD000, 0x66);
+    BusWrite(@bus2, 0xFF70, 0x02);
+    if BusRead(@bus2, 0xD000) != 0x55 { return 21; }
+    // エコーRAM(D000のエコーはF000)がバンクを追従する。
+    if BusRead(@bus2, 0xF000) != 0x55 { return 22; }
+    BusWrite(@bus2, 0xFF70, 0x03);
+    if BusRead(@bus2, 0xD000) != 0x66 { return 23; }
+
+    // C000-CFFFは常にバンク0固定。
+    BusWrite(@bus2, 0xC000, 0x77);
+    BusWrite(@bus2, 0xFF70, 0x02);
+    if BusRead(@bus2, 0xC000) != 0x77 { return 24; }
+
+    // DMGモードではSVBK書き込みが無視される(常にバンク1固定)。
+    var busDmg2: Bus;
+    BusInit(@busDmg2);
+    BusWrite(@busDmg2, 0xD000, 0x12);
+    BusWrite(@busDmg2, 0xFF70, 0x03); // 無視されるはず
+    if BusRead(@busDmg2, 0xFF70) != 0xFF { return 25; } // 0xF8|1
+    if BusRead(@busDmg2, 0xD000) != 0x12 { return 26; }
+
+    // --- T6-4: CGB パレットRAM(BCPS/BCPD, FF68/69) ---
+    var bus3: Bus;
+    BusInit(@bus3);
+    bus3.mode = GbMode::Cgb;
+
+    BusWrite(@bus3, 0xFF68, 0x80); // オートインクリメント有効、index=0
+    BusWrite(@bus3, 0xFF69, 0x11); // bgPaletteRam[0] = 0x11、書込み時のみindex+1
+    if BusRead(@bus3, 0xFF68) != 0xC1 { return 30; } // bit7維持・bit6常時1・index=1
+    BusWrite(@bus3, 0xFF69, 0x22); // bgPaletteRam[1] = 0x22
+
+    BusWrite(@bus3, 0xFF68, 0x00); // オートインクリメント無効、index=0
+    if BusRead(@bus3, 0xFF69) != 0x11 { return 31; }
+    if BusRead(@bus3, 0xFF68) != 0x40 { return 32; } // 読み出しではインクリメントしない
+    BusWrite(@bus3, 0xFF68, 0x01);
+    if BusRead(@bus3, 0xFF69) != 0x22 { return 33; }
+
+    // OCPS/OCPDはBCPS/BCPDと独立。
+    BusWrite(@bus3, 0xFF6A, 0x80);
+    BusWrite(@bus3, 0xFF6B, 0x33);
+    BusWrite(@bus3, 0xFF68, 0x00);
+    if BusRead(@bus3, 0xFF69) != 0x11 { return 34; } // BCPS/BCPDは影響を受けない
+
+    // 64でラップする。
+    BusWrite(@bus3, 0xFF68, 0x80 | 0x3F); // index=63, autoinc有効
+    BusWrite(@bus3, 0xFF69, 0x99);
+    if (BusRead(@bus3, 0xFF68) & 0x3F) != 0 { return 35; }
+
+    // DMGモードではBCPS/BCPD/OCPS/OCPDは常に0xFFを返し、書き込みも無視される。
+    var busDmg3: Bus;
+    BusInit(@busDmg3);
+    BusWrite(@busDmg3, 0xFF68, 0x80);
+    if BusRead(@busDmg3, 0xFF68) != 0xFF { return 36; }
+
+    // --- T6-4連携: 実際の描画パスでCGBパレットRAM(RGB555->ARGB)が使われることを確認 ---
+    var bus4: Bus;
+    BusInit(@bus4);
+    BusPowerOn(@bus4);
+    bus4.mode = GbMode::Cgb;
+    // タイル0(0x8000起点)の1行目を全ピクセルcolorNumber=3にする。
+    BusWrite(@bus4, 0xFF4F, 0x00); // VRAMバンク0
+    BusWrite(@bus4, 0x8000, 0xFF);
+    BusWrite(@bus4, 0x8001, 0xFF);
+    // BGパレット0のcolor3を純赤(R=31,G=0,B=0)に設定。
+    BusWrite(@bus4, 0xFF68, 6); // オートインクリメント無効、index=6(パレット0color3の下位バイト)
+    BusWrite(@bus4, 0xFF69, 0x1F);
+    BusWrite(@bus4, 0xFF68, 7);
+    BusWrite(@bus4, 0xFF69, 0x00);
+    // Draw(80+172=252dot)を超えてHBlankへ遷移させ、1ライン目を描画させる。
+    BusTick(@bus4, 252);
+    if bus4.ppu.framebuffer[0] != 0xFFFF0000u32 { return 40; }
+
+    // --- T6-5: CGBの優先度制御 ---
+    var bus5: Bus;
+    BusInit(@bus5);
+    BusPowerOn(@bus5);
+    bus5.mode = GbMode::Cgb;
+    BusWrite(@bus5, 0xFF40, bus5.ppu.lcdc | 0x02); // OBJ有効化(post-boot既定値はbit1=0)
+    // BGタイル0の1行目をcolorNumber=1にする(パレット適用前の判定にのみ使う)。
+    BusWrite(@bus5, 0xFF4F, 0x00);
+    BusWrite(@bus5, 0x8000, 0xFF); // low=1のみ設定
+    BusWrite(@bus5, 0x8001, 0x00);
+    // BG・OBJパレットに区別できる色を設定(BG=赤、OBJ=緑)。
+    BusWrite(@bus5, 0xFF68, 0x02); // BGパレット0color1: index=2
+    BusWrite(@bus5, 0xFF69, 0x1F); // 赤
+    BusWrite(@bus5, 0xFF68, 0x03);
+    BusWrite(@bus5, 0xFF69, 0x00);
+    BusWrite(@bus5, 0xFF6A, 0x02); // OBJパレット0color1: index=2
+    BusWrite(@bus5, 0xFF6B, 0xE0); // 緑(G=31): raw=0x03E0 -> low=0xE0,high=0x03
+    BusWrite(@bus5, 0xFF6A, 0x03);
+    BusWrite(@bus5, 0xFF6B, 0x03);
+    // OBJ用タイル1(0x8010)にcolorNumber=1を設定。
+    BusWrite(@bus5, 0x8010, 0xFF);
+    BusWrite(@bus5, 0x8011, 0x00);
+    // OAM: index0にスプライトを画面(0,0)へ配置(Y=16,X=8)、タイル1、属性0(OAM優先度なし)。
+    BusWrite(@bus5, 0xFE00, 16);
+    BusWrite(@bus5, 0xFE01, 8);
+    BusWrite(@bus5, 0xFE02, 1);
+    BusWrite(@bus5, 0xFE03, 0x00);
+
+    // LCDC bit0=1(マスタープライオリティ有効)・OAM優先度=0・BG属性優先度=0
+    // -> OBJが勝つ(緑)。
+    BusTick(@bus5, 252);
+    if bus5.ppu.framebuffer[0] != 0xFF00FF00u32 { return 50; }
+
+    // OAM属性bit7(OAM優先度)を立てるとBGが勝つ(赤)。次のラインは
+    // 描画済みなので新しいBusで再検証する。
+    var bus5b: Bus;
+    BusInit(@bus5b);
+    BusPowerOn(@bus5b);
+    bus5b.mode = GbMode::Cgb;
+    BusWrite(@bus5b, 0xFF40, bus5b.ppu.lcdc | 0x02); // OBJ有効化(post-boot既定値はbit1=0)
+    BusWrite(@bus5b, 0xFF4F, 0x00);
+    BusWrite(@bus5b, 0x8000, 0xFF);
+    BusWrite(@bus5b, 0x8001, 0x00);
+    BusWrite(@bus5b, 0xFF68, 0x02);
+    BusWrite(@bus5b, 0xFF69, 0x1F);
+    BusWrite(@bus5b, 0xFF68, 0x03);
+    BusWrite(@bus5b, 0xFF69, 0x00);
+    BusWrite(@bus5b, 0xFF6A, 0x02);
+    BusWrite(@bus5b, 0xFF6B, 0xE0);
+    BusWrite(@bus5b, 0xFF6A, 0x03);
+    BusWrite(@bus5b, 0xFF6B, 0x03);
+    BusWrite(@bus5b, 0x8010, 0xFF);
+    BusWrite(@bus5b, 0x8011, 0x00);
+    BusWrite(@bus5b, 0xFE00, 16);
+    BusWrite(@bus5b, 0xFE01, 8);
+    BusWrite(@bus5b, 0xFE02, 1);
+    BusWrite(@bus5b, 0xFE03, 0x80); // OAM属性bit7=1
+    BusTick(@bus5b, 252);
+    if bus5b.ppu.framebuffer[0] != 0xFFFF0000u32 { return 51; }
+
+    // LCDC bit0=0(マスタープライオリティ無効)ならOAM優先度に関わらずOBJが勝つ。
+    var bus5c: Bus;
+    BusInit(@bus5c);
+    BusPowerOn(@bus5c);
+    bus5c.mode = GbMode::Cgb;
+    BusWrite(@bus5c, 0xFF40, bus5c.ppu.lcdc | 0x02); // OBJ有効化(post-boot既定値はbit1=0)
+    BusWrite(@bus5c, 0xFF40, bus5c.ppu.lcdc & ~0x01); // BG enableビットを落とす
+    BusWrite(@bus5c, 0xFF4F, 0x00);
+    BusWrite(@bus5c, 0x8000, 0xFF);
+    BusWrite(@bus5c, 0x8001, 0x00);
+    BusWrite(@bus5c, 0xFF68, 0x02);
+    BusWrite(@bus5c, 0xFF69, 0x1F);
+    BusWrite(@bus5c, 0xFF68, 0x03);
+    BusWrite(@bus5c, 0xFF69, 0x00);
+    BusWrite(@bus5c, 0xFF6A, 0x02);
+    BusWrite(@bus5c, 0xFF6B, 0xE0);
+    BusWrite(@bus5c, 0xFF6A, 0x03);
+    BusWrite(@bus5c, 0xFF6B, 0x03);
+    BusWrite(@bus5c, 0x8010, 0xFF);
+    BusWrite(@bus5c, 0x8011, 0x00);
+    BusWrite(@bus5c, 0xFE00, 16);
+    BusWrite(@bus5c, 0xFE01, 8);
+    BusWrite(@bus5c, 0xFE02, 1);
+    BusWrite(@bus5c, 0xFE03, 0x80); // OAM優先度ビットが立っていてもOBJが勝つはず
+    BusTick(@bus5c, 252);
+    if bus5c.ppu.framebuffer[0] != 0xFF00FF00u32 { return 52; }
+
+    // OAM順優先度: X座標に関係なくOAM index0が勝つ(DMGならX優先でindex1が勝つ場面)。
+    var bus5d: Bus;
+    BusInit(@bus5d);
+    BusPowerOn(@bus5d);
+    bus5d.mode = GbMode::Cgb;
+    BusWrite(@bus5d, 0xFF40, bus5d.ppu.lcdc | 0x02); // OBJ有効化(post-boot既定値はbit1=0)
+    BusWrite(@bus5d, 0xFF4F, 0x00);
+    // タイル1(index0が使う、colorNumber=1=緑扱い)とタイル2(index1が使う、colorNumber=2)。
+    BusWrite(@bus5d, 0x8010, 0xFF); // tile1 row0: colorNumber=1
+    BusWrite(@bus5d, 0x8011, 0x00);
+    BusWrite(@bus5d, 0x8020, 0x00); // tile2 row0: colorNumber=2
+    BusWrite(@bus5d, 0x8021, 0xFF);
+    BusWrite(@bus5d, 0xFF6A, 0x02); // OBJパレット0 color1 = 緑
+    BusWrite(@bus5d, 0xFF6B, 0xE0);
+    BusWrite(@bus5d, 0xFF6A, 0x03);
+    BusWrite(@bus5d, 0xFF6B, 0x03);
+    BusWrite(@bus5d, 0xFF6A, 0x04); // OBJパレット0 color2 = 青
+    BusWrite(@bus5d, 0xFF6B, 0x00);
+    BusWrite(@bus5d, 0xFF6A, 0x05);
+    BusWrite(@bus5d, 0xFF6B, 0x7C);
+    // OAM index0: X=12(画面X=4)、タイル2(青)。OAM index1: X=8(画面X=0)、タイル1(緑)。
+    // 8x8スプライトなので画面X=4のスプライトは0-7、画面X=0のスプライトは0-7、重なるのはx=4-7。
+    BusWrite(@bus5d, 0xFE00, 16); BusWrite(@bus5d, 0xFE01, 12); BusWrite(@bus5d, 0xFE02, 2); BusWrite(@bus5d, 0xFE03, 0);
+    BusWrite(@bus5d, 0xFE04, 16); BusWrite(@bus5d, 0xFE05, 8);  BusWrite(@bus5d, 0xFE06, 1); BusWrite(@bus5d, 0xFE07, 0);
+    BusTick(@bus5d, 252);
+    // CGBはOAM順(index0が勝つ)なので x=4 は青(index0のタイル2)になるはず。
+    if bus5d.ppu.framebuffer[4] != 0xFF0000FFu32 { return 53; }
+
+    // --- T6-6: ダブルスピードモード(KEY1) ---
+    var bus6: Bus;
+    BusInit(@bus6);
+    bus6.mode = GbMode::Cgb;
+    BusWrite(@bus6, 0xFF4D, 0x01); // 切替準備
+    if !bus6.speedSwitchPrepared { return 60; }
+    if BusRead(@bus6, 0xFF4D) != 0x7F { return 61; } // bit7=0(未切替)・bit0=1
+
+    var cpu6: Cpu;
+    CpuReset(@cpu6, GbMode::Cgb);
+    bus6.divCounter = 1234;
+    BusWrite(@bus6, 0xC000, 0x10); // STOP
+    cpu6.pc = 0xC000;
+    CpuStep(@cpu6, @bus6);
+    if !bus6.doubleSpeed { return 62; }
+    if bus6.speedSwitchPrepared { return 63; }
+    if BusRead(@bus6, 0xFF4D) != 0xFE { return 64; } // bit7=1(切替済み)・bit0=0
+    if (BusRead(@bus6, 0xFF04)) != 0 { return 65; } // DIVリセット
+
+    // ダブルスピード中はPPU/APUへの供給が半分になる(hwCyclesがcyclesの半分)。
+    let cyclesBefore = bus6.cycles;
+    let hwBefore = bus6.hwCycles;
+    BusTick(@bus6, 8);
+    if (bus6.cycles - cyclesBefore) != 8 { return 66; }
+    if (bus6.hwCycles - hwBefore) != 4 { return 67; }
+
+    // DMGモード、またはCGBでも未準備ならSTOPは速度に影響しない。
+    var busDmg6: Bus;
+    BusInit(@busDmg6);
+    var cpuDmg6: Cpu;
+    CpuReset(@cpuDmg6, GbMode::Dmg);
+    BusWrite(@busDmg6, 0xC000, 0x10);
+    cpuDmg6.pc = 0xC000;
+    CpuStep(@cpuDmg6, @busDmg6);
+    if busDmg6.doubleSpeed { return 68; }
+
+    // --- T6-7: HDMA / GDMA ---
+    var bus7: Bus;
+    BusInit(@bus7);
+    BusPowerOn(@bus7);
+    bus7.mode = GbMode::Cgb;
+
+    // GDMA: WRAM(0xC000起点)からVRAM(0x8000起点)へ32バイト(2ブロック)転送。
+    var i: uint16 = 0;
+    while i < 32u16 {
+        BusWrite(@bus7, 0xC000 + i, (i & 0xFF) as uint8);
+        i += 1u16;
+    }
+    BusWrite(@bus7, 0xFF51, 0xC0); // HDMA1: ソース上位
+    BusWrite(@bus7, 0xFF52, 0x00); // HDMA2: ソース下位
+    BusWrite(@bus7, 0xFF53, 0x00); // HDMA3: 宛先上位(0x8000起点)
+    BusWrite(@bus7, 0xFF54, 0x00); // HDMA4: 宛先下位
+    let cyclesBeforeGdma = bus7.cycles;
+    BusWrite(@bus7, 0xFF55, 0x01); // GDMA、(1+1)*16=32バイト
+    if (bus7.cycles - cyclesBeforeGdma) != 16u64 { return 70; } // 2ブロック*8サイクル
+    var j: uint16 = 0;
+    while j < 32u16 {
+        if BusRead(@bus7, 0x8000 + j) != ((j & 0xFF) as uint8) { return 71; }
+        j += 1u16;
+    }
+    if BusRead(@bus7, 0xFF55) != 0xFF { return 72; } // 完了後は非アクティブ
+
+    // HDMA(HBlank毎): 開始直後はまだ転送されない。
+    var bus8: Bus;
+    BusInit(@bus8);
+    BusPowerOn(@bus8);
+    bus8.mode = GbMode::Cgb;
+    var k: uint16 = 0;
+    while k < 32u16 {
+        BusWrite(@bus8, 0xC000 + k, 0xAA);
+        k += 1u16;
+    }
+    BusWrite(@bus8, 0xFF51, 0xC0);
+    BusWrite(@bus8, 0xFF52, 0x00);
+    BusWrite(@bus8, 0xFF53, 0x00);
+    BusWrite(@bus8, 0xFF54, 0x00);
+    BusWrite(@bus8, 0xFF55, 0x81); // HDMA、2ブロック
+    if BusRead(@bus8, 0x8000) == 0xAA { return 80; } // まだ転送されていない
+    if BusRead(@bus8, 0xFF55) != 0x01 { return 81; } // アクティブ、残り2-1=1
+    BusTick(@bus8, 252); // 1ライン目のHBlank突入で1ブロック(16バイト)転送
+    if BusRead(@bus8, 0x8000) != 0xAA { return 82; }
+    if BusRead(@bus8, 0x800F) != 0xAA { return 83; }
+    if BusRead(@bus8, 0x8010) == 0xAA { return 84; } // 2ブロック目はまだ
+    if BusRead(@bus8, 0xFF55) != 0x00 { return 85; } // アクティブ、残り1-1=0
+    BusTick(@bus8, 456); // 次のラインのHBlankで2ブロック目
+    if BusRead(@bus8, 0x8010) != 0xAA { return 86; }
+    if BusRead(@bus8, 0xFF55) != 0xFF { return 87; } // 完了
+
+    // 中断: 進行中にbit7=0を書くと中断し、残りブロック数をFF55読み出しに反映する。
+    var bus9: Bus;
+    BusInit(@bus9);
+    BusPowerOn(@bus9);
+    bus9.mode = GbMode::Cgb;
+    BusWrite(@bus9, 0xFF51, 0xC0);
+    BusWrite(@bus9, 0xFF52, 0x00);
+    BusWrite(@bus9, 0xFF53, 0x00);
+    BusWrite(@bus9, 0xFF54, 0x00);
+    BusWrite(@bus9, 0xFF55, 0x81); // HDMA、2ブロック
+    BusWrite(@bus9, 0xFF55, 0x00); // 中断
+    if BusRead(@bus9, 0xFF55) != 0x81 { return 90; } // bit7=1、残り2-1=1
+
+    // DMGモードではHDMA系レジスタは常に0xFFを返し、書き込みも無視される。
+    var busDmg9: Bus;
+    BusInit(@busDmg9);
+    BusPowerOn(@busDmg9);
+    BusWrite(@busDmg9, 0xFF55, 0x81);
+    if BusRead(@busDmg9, 0xFF55) != 0xFF { return 91; }
+
+    return 0;
+}

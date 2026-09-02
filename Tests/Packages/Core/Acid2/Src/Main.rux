@@ -60,7 +60,6 @@ func OpenRom(path: Slice<char8>) -> int32 {
     return open(@buf[0], 0);
 }
 
-const ExpectedHash: uint64 = 0x17A0F9970AC4D084u64;
 const FnvOffsetBasis: uint64 = 0xcbf29ce484222325u64;
 const FnvPrime: uint64 = 0x100000001b3u64;
 
@@ -68,13 +67,19 @@ func FnvByte(hash: uint64, b: uint8) -> uint64 {
     return (hash ^ (b as uint64)) * FnvPrime;
 }
 
-func Main() -> int {
-    PrintLine("=== Running dmg-acid2 Framebuffer Hash Test ===");
+/// dmg-acid2 / cgb-acid2 共通のフレームバッファハッシュ判定。CGB版はヘッダの
+/// CGBフラグ(0xC0)から `BusLoadRom` が自動的に Cgb モードを判定するため、
+/// `CpuReset` はロード後の `bus.mode` を使う(ロード前は不明なため)。
+func RunAcid2Test(romPath: Slice<char8>, label: Slice<char8>, expectedHash: uint64) -> int {
+    Print("=== Running ");
+    Print(label);
+    PrintLine(" Framebuffer Hash Test ===");
 
-    let path: Slice<char8> = "tests/roms/acid2/dmg-acid2.gb\0";
-    let fd = OpenRom(path);
+    let fd = OpenRom(romPath);
     if fd < 0 {
-        PrintLine("ROM not found (skipped): tests/roms/acid2/dmg-acid2.gb");
+        Print("ROM not found (skipped): ");
+        Print(romPath);
+        PrintLine("");
         return 0;
     }
 
@@ -82,19 +87,22 @@ func Main() -> int {
     let bytesRead = read(fd, @romData[0] as *var opaque, 32768u);
     close(fd);
     if bytesRead <= 0 {
-        PrintLine("Failed to read ROM: dmg-acid2.gb");
+        Print("Failed to read ROM: ");
+        PrintLine(romPath);
         return 1;
     }
 
     var cpu: Cpu;
     var bus: Bus;
-    CpuReset(@cpu, GbMode::Dmg);
     BusInit(@bus);
     BusPowerOn(@bus);
     if !BusLoadRom(@bus, Slice<uint8> { data: @romData[0], length: bytesRead as uint }) {
-        PrintLine("Failed to load ROM: dmg-acid2.gb");
+        Print("Failed to load ROM: ");
+        Print(romPath);
+        PrintLine("");
         return 1;
     }
+    CpuReset(@cpu, bus.mode);
 
     let targetCycles: uint64 = CyclesPerFrame * 100u64;
     while bus.cycles < targetCycles {
@@ -112,14 +120,28 @@ func Main() -> int {
         i += 1;
     }
 
-    if hash == ExpectedHash {
-        PrintLine("PASS: dmg-acid2 framebuffer hash matches");
+    if hash == expectedHash {
+        Print("PASS: ");
+        Print(label);
+        PrintLine(" framebuffer hash matches");
         return 0;
     }
-    Print("FAIL: dmg-acid2 framebuffer hash mismatch got=0x");
+    Print("FAIL: ");
+    Print(label);
+    Print(" framebuffer hash mismatch got=0x");
     PrintHex64(hash);
     Print(" expected=0x");
-    PrintHex64(ExpectedHash);
+    PrintHex64(expectedHash);
     PrintLine("");
     return 1;
+}
+
+func Main() -> int {
+    let dmgResult = RunAcid2Test("tests/roms/acid2/dmg-acid2.gb\0", "dmg-acid2", 0x17A0F9970AC4D084u64);
+    if dmgResult != 0 { return dmgResult; }
+
+    let cgbResult = RunAcid2Test("tests/roms/acid2/cgb-acid2.gb\0", "cgb-acid2", 0x8C0A422078D38470u64);
+    if cgbResult != 0 { return cgbResult; }
+
+    return 0;
 }

@@ -126,6 +126,16 @@ func ClassifyCgbFlag(code: uint8) -> CgbFlag {
     return CgbFlag::DmgOnly;
 }
 
+/// ヘッダのCGBフラグから実行モードを決める(拡張子ではなくヘッダのみで判定)。
+/// CgbEnhanced(0x80)・CgbOnly(0xC0)いずれも Cgb モードで起動する
+/// (実CGBハードで動かした場合の挙動どおり)。
+pub func GbModeFromCgbFlag(flag: CgbFlag) -> GbMode {
+    if flag == CgbFlag::DmgOnly {
+        return GbMode::Dmg;
+    }
+    return GbMode::Cgb;
+}
+
 /// ROM全体のバイト列からヘッダを解析する。romの所有権は呼び出し側に残る。
 /// 実際にロードして実行する経路(`CartridgeInit`)から呼ばれ、rom全体のサイズが
 /// ヘッダの申告するROMサイズ以上あるかまで検証する(RomSmallerThanHeader)。

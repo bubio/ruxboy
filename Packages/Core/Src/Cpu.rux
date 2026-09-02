@@ -734,8 +734,15 @@ pub func CpuExecute(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
             cpu.halted = true;
         }
     } else if opcode == 0x10 {
-        // STOP: 2バイト命令
+        // STOP: 2バイト命令(パディングバイトを読み飛ばす)。
+        // T6-6: CGBモードでKEY1切替準備(speedSwitchPrepared)済みならここで速度を
+        // 反転する。DMGモード、またはCGBでも準備されていなければ何もしない。
         cpu.pc += 1;
+        if bus.mode == GbMode::Cgb && bus.speedSwitchPrepared {
+            bus.doubleSpeed = !bus.doubleSpeed;
+            bus.speedSwitchPrepared = false;
+            TimerWriteDiv(bus); // DIVリセット(実機の仕様、Pan Docs "CGB Registers: KEY1")
+        }
     } else if opcode == 0xF3 {
         cpu.ime = false;
         cpu.imeDelay = 0;
