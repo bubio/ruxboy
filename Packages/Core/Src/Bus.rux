@@ -244,19 +244,69 @@ func TimerAdvanceReload(bus: *var Bus) {
 
 /// DIV/TIMA を tCycles ぶん、1 T-cycleずつ進める(falling-edge検出の
 /// 取りこぼしを防ぐため、まとめて計算せず逐次進める)。
+///
+/// 落とし穴(性能): CPU全メモリアクセスごとに呼ばれる最も熱いパスであり、Rux
+/// Releaseパイプラインは関数インライン化を行わない(external/Rux/Docs/
+/// Architecture.mdに列挙されたRelease最適化は定数畳み込み/コピー伝播/DCE/
+/// CFG整理のみ)。TimerAdvanceReload/TimerSignal/TimerSelectedBit/
+/// TimerIncrementTima を1 T-cycleごとに呼んでいた実装から、このループ本体へ
+/// 手動でインライン化した(bus.tac はこの関数の実行中に変化しないため
+/// selectedBit/enabled もループ外で1回だけ計算する)。Apu.rux の ApuTick と
+/// 同じ対策(phase-05-apu.md参照)。
 func TimerTick(bus: *var Bus, tCycles: int) {
-    bus.timerReloadJustHappened = false;
+    let tac = bus.tac;
+    let enabled = (tac & 0x04) != 0;
+    var selectedBit: uint = 7;
+    let speed = tac & 0x03;
+    if speed == 0 { selectedBit = 9; }
+    else if speed == 1 { selectedBit = 3; }
+    else if speed == 2 { selectedBit = 5; }
+    let mask: uint16 = (1 as uint16) << selectedBit;
+
+    var divider = bus.divCounter;
+    var reloadPending = bus.timerReloadPending;
+    var tima = bus.tima;
+    let tma = bus.tma;
+    var ifReg = bus.io[0x0F];
+    var reloadJustHappened = false;
+
     var cycle: int = 0;
     while cycle < tCycles {
-        TimerAdvanceReload(bus);
-        let oldSignal = TimerSignal(bus.divCounter, bus.tac);
-        bus.divCounter += 1;
-        let newSignal = TimerSignal(bus.divCounter, bus.tac);
+        // TimerAdvanceReload をインライン化
+        if reloadPending > 0 {
+            if reloadPending == 1 {
+                reloadPending = 0;
+                tima = tma;
+                reloadJustHappened = true;
+                ifReg = ifReg | 0x04;
+            } else {
+                reloadPending -= 1;
+            }
+        }
+
+        // TimerSignal をインライン化(enabled/mask はループ外で計算済み)
+        let oldSignal = enabled && (divider & mask) != 0;
+        divider += 1;
+        let newSignal = enabled && (divider & mask) != 0;
         if oldSignal && !newSignal {
-            TimerIncrementTima(bus);
+            // TimerIncrementTima をインライン化
+            if reloadPending <= 0 {
+                if tima == 0xFF {
+                    tima = 0;
+                    reloadPending = 4;
+                } else {
+                    tima += 1;
+                }
+            }
         }
         cycle += 1;
     }
+
+    bus.divCounter = divider;
+    bus.timerReloadPending = reloadPending;
+    bus.tima = tima;
+    bus.io[0x0F] = ifReg;
+    bus.timerReloadJustHappened = reloadJustHappened;
 }
 
 /// VRAM の任意バンクを直接読む(HDMA のソース読み取り用。CPU バス経由ではないため

@@ -322,8 +322,13 @@ func BgTileDataAddr(lcdc: uint8, tileIndex: uint8, rowInTile: int) -> uint16 {
 /// 適用前)を取り出す。bit7が左端ピクセル。CGBのBG/ウィンドウ/OBJいずれも属性
 /// bit3(またはOAM属性bit3)でバンク0/1を選ぶ。
 func TilePixelColorNumber(bus: *Bus, bank: uint8, tileAddr: uint16, colInTile: int) -> uint8 {
-    let low = VramReadBank(bus, bank, tileAddr);
-    let high = VramReadBank(bus, bank, tileAddr + 1);
+    // VramReadBank をインライン化(BG/ウィンドウ/スプライトの全ピクセルで
+    // 呼ばれる最も熱いパスのため、Rux Releaseが関数インライン化を行わない
+    // 問題への対策。Bus.rux の TimerTick と同じ方針)。
+    let b = (bank & 0x01) as uint;
+    let base = b * VramBankSize + (tileAddr - 0x8000) as uint;
+    let low = bus.vram[base];
+    let high = bus.vram[base + 1];
     let shift = (7 - colInTile) as uint;
     let lowBit = (low >> shift) & 0x01;
     let highBit = (high >> shift) & 0x01;
@@ -345,11 +350,12 @@ func TileMapPixel(bus: *Bus, mapBase: uint16, lcdc: uint8, sourceX: int, sourceY
     let tileCol = sourceX / 8;
     let tileRow = sourceY / 8;
     let tileMapAddr = mapBase + ((tileRow * 32 + tileCol) as uint16);
-    let tileIndex = VramReadBank(bus, 0, tileMapAddr);
+    // VramReadBank をインライン化(バンクは呼び出し側で0/1固定のため)。
+    let tileIndex = bus.vram[(tileMapAddr - 0x8000) as uint];
 
     var attr: uint8 = 0;
     if bus.mode == GbMode::Cgb {
-        attr = VramReadBank(bus, 1, tileMapAddr);
+        attr = bus.vram[VramBankSize + (tileMapAddr - 0x8000) as uint];
     }
 
     var rowInTile = sourceY % 8;
@@ -638,6 +644,14 @@ func PpuRenderSprites(bus: *var Bus, lineStart: uint) {
 
 /// tCycles ぶん PPU の状態を進める。LY/モード遷移のエッジをまたぐ変化を
 /// 見落とさないため1 T-cycleずつ進める。LCDC bit7=0の間は完全に停止する。
+///
+/// 落とし穴(性能): CPU全メモリアクセスごとに呼ばれる最も熱いパスの一つ。
+/// PpuUpdateStatIrq が見る statIrqLine は lycEqual(LY==LYC の一致、dot が
+/// ラインを跨いだときだけ再計算される)と mode(モード遷移時だけ変わる)にのみ
+/// 依存するため、そのどちらも変化しなかった T-cycle では呼んでも結果は
+/// 不変。1 T-cycleごと(1ラインにつき456回)呼んでいたのを、ラインが進んだ
+/// ときとモードが遷移したときだけ(1ラインにつき数回)に絞った。
+/// TimerTick と同じ対策方針(Bus.rux 参照)。
 pub func PpuTick(bus: *var Bus, tCycles: int) {
     if (bus.ppu.lcdc & LcdcBitLcdEnable) == 0 {
         return;
@@ -646,6 +660,7 @@ pub func PpuTick(bus: *var Bus, tCycles: int) {
     var cycle: int = 0;
     while cycle < tCycles {
         let prevMode = bus.ppu.mode;
+        var lineAdvanced = false;
         bus.ppu.dot += 1;
         if bus.ppu.dot >= CyclesPerLine {
             bus.ppu.dot = 0;
@@ -655,8 +670,20 @@ pub func PpuTick(bus: *var Bus, tCycles: int) {
                 bus.ppu.windowLine = 0;
             }
             PpuUpdateLycEqual(@bus.ppu);
+            lineAdvanced = true;
         }
-        bus.ppu.mode = PpuModeFor(bus.ppu.ly, bus.ppu.dot);
+        // PpuModeFor をインライン化(呼び出しオーバーヘッド削減)
+        let ly = bus.ppu.ly;
+        let dot = bus.ppu.dot;
+        var mode: uint8 = ModeHBlank;
+        if (ly as int) >= VblankStartLine {
+            mode = ModeVBlank;
+        } else if dot < Mode2Dots {
+            mode = ModeOamScan;
+        } else if dot < Mode2Dots + Mode3Dots {
+            mode = ModeDraw;
+        }
+        bus.ppu.mode = mode;
 
         if prevMode != ModeVBlank && bus.ppu.mode == ModeVBlank {
             bus.io[0x0F] = bus.io[0x0F] | IntrVBlankBit;
@@ -666,7 +693,9 @@ pub func PpuTick(bus: *var Bus, tCycles: int) {
             HdmaOnHblank(bus); // T6-7: HDMA(HBlank毎16バイト転送)のフック
         }
 
-        PpuUpdateStatIrq(bus);
+        if lineAdvanced || prevMode != bus.ppu.mode {
+            PpuUpdateStatIrq(bus);
+        }
         cycle += 1;
     }
 }
