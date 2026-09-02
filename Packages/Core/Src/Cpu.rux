@@ -1,11 +1,15 @@
-// SM83 CPU (Game Boy / Game Boy Color). M-cycle 粒度で駆動する。
+/// SM83 CPU (Game Boy / Game Boy Color)。M-cycle 粒度で駆動する。
 
-// F レジスタのビット定義
-pub const FlagZ: uint8 = 0x80; // Zero
-pub const FlagN: uint8 = 0x40; // Subtract
-pub const FlagH: uint8 = 0x20; // Half carry
-pub const FlagC: uint8 = 0x10; // Carry
+/// F レジスタ bit7: Zero フラグ。
+pub const FlagZ: uint8 = 0x80;
+/// F レジスタ bit6: Subtract フラグ。
+pub const FlagN: uint8 = 0x40;
+/// F レジスタ bit5: Half carry フラグ。
+pub const FlagH: uint8 = 0x20;
+/// F レジスタ bit4: Carry フラグ。
+pub const FlagC: uint8 = 0x10;
 
+/// SM83 CPU のレジスタ・内部状態一式。
 pub struct Cpu {
     pub a: uint8;
     pub f: uint8;
@@ -30,37 +34,45 @@ pub struct Cpu {
 // --- 16bit レジスタペアアクセス ---
 // F の下位 4bit は常に 0 にマスクする
 
+/// AF レジスタペアを読む。
 pub func CpuAf(cpu: *Cpu) -> uint16 {
     return (cpu.a as uint16 << 8) | (cpu.f as uint16);
 }
 
+/// AF レジスタペアへ書く(F の下位4bitは常に0にマスクされる)。
 pub func CpuSetAf(cpu: *var Cpu, v: uint16) {
     cpu.a = (v >> 8) as uint8;
     cpu.f = (v as uint8) & 0xF0;
 }
 
+/// BC レジスタペアを読む。
 pub func CpuBc(cpu: *Cpu) -> uint16 {
     return (cpu.b as uint16 << 8) | (cpu.c as uint16);
 }
 
+/// BC レジスタペアへ書く。
 pub func CpuSetBc(cpu: *var Cpu, v: uint16) {
     cpu.b = (v >> 8) as uint8;
     cpu.c = v as uint8;
 }
 
+/// DE レジスタペアを読む。
 pub func CpuDe(cpu: *Cpu) -> uint16 {
     return (cpu.d as uint16 << 8) | (cpu.e as uint16);
 }
 
+/// DE レジスタペアへ書く。
 pub func CpuSetDe(cpu: *var Cpu, v: uint16) {
     cpu.d = (v >> 8) as uint8;
     cpu.e = v as uint8;
 }
 
+/// HL レジスタペアを読む。
 pub func CpuHl(cpu: *Cpu) -> uint16 {
     return (cpu.h as uint16 << 8) | (cpu.l as uint16);
 }
 
+/// HL レジスタペアへ書く。
 pub func CpuSetHl(cpu: *var Cpu, v: uint16) {
     cpu.h = (v >> 8) as uint8;
     cpu.l = v as uint8;
@@ -68,6 +80,7 @@ pub func CpuSetHl(cpu: *var Cpu, v: uint16) {
 
 // --- フラグ操作 ---
 
+/// Z/N/H/C の4フラグをまとめて設定する(F の下位4bitは0固定)。
 pub func CpuSetFlags(cpu: *var Cpu, z: bool, n: bool, h: bool, c: bool) {
     var f: uint8 = 0;
     if z { f = f | FlagZ; }
@@ -77,23 +90,28 @@ pub func CpuSetFlags(cpu: *var Cpu, z: bool, n: bool, h: bool, c: bool) {
     cpu.f = f;
 }
 
+/// Zero フラグを読む。
 pub func CpuFlagZ(cpu: *Cpu) -> bool {
     return (cpu.f & FlagZ) != 0;
 }
 
+/// Subtract フラグを読む。
 pub func CpuFlagN(cpu: *Cpu) -> bool {
     return (cpu.f & FlagN) != 0;
 }
 
+/// Half carry フラグを読む。
 pub func CpuFlagH(cpu: *Cpu) -> bool {
     return (cpu.f & FlagH) != 0;
 }
 
+/// Carry フラグを読む。
 pub func CpuFlagC(cpu: *Cpu) -> bool {
     return (cpu.f & FlagC) != 0;
 }
 
-// cpu_reset はブート ROM 完了直後のレジスタ状態を直接セットする
+/// ブート ROM 完了直後のレジスタ状態を直接セットする(実 BIOS を読み込まない
+/// 方針のため、DMG/CGB それぞれの post-boot 値を固定で書き込む)。
 pub func CpuReset(cpu: *var Cpu, mode: GbMode) {
     if mode == GbMode::Dmg {
         CpuSetAf(cpu, 0x01B0);
@@ -118,6 +136,7 @@ pub func CpuReset(cpu: *var Cpu, mode: GbMode) {
     cpu.ldBbHit = false;
 }
 
+/// 未定義オペコードを検知したときの共通処理(停止扱いにする)。
 func CpuLogIllegal(cpu: *var Cpu, opcode: uint8) {
     cpu.illegalOpcodeHit = true;
     cpu.stopped = true;
@@ -125,12 +144,14 @@ func CpuLogIllegal(cpu: *var Cpu, opcode: uint8) {
 
 // --- フェッチヘルパー ---
 
+/// PC の指すバイトを読み、PC を1進める。
 func ReadImm8(cpu: *var Cpu, bus: *var Bus) -> uint8 {
     let v = CpuRead8(cpu, bus, cpu.pc);
     cpu.pc += 1;
     return v;
 }
 
+/// PC の指す2バイト(リトルエンディアン)を読み、PC を2進める。
 func ReadImm16(cpu: *var Cpu, bus: *var Bus) -> uint16 {
     let lo = ReadImm8(cpu, bus);
     let hi = ReadImm8(cpu, bus);
@@ -139,6 +160,7 @@ func ReadImm16(cpu: *var Cpu, bus: *var Bus) -> uint16 {
 
 // --- r8 インデックス (0=B,1=C,2=D,3=E,4=H,5=L,6=(HL),7=A) ---
 
+/// r8 インデックスからレジスタ(または (HL))の値を読む。
 func R8Get(cpu: *var Cpu, bus: *var Bus, idx: uint8) -> uint8 {
     if idx == 0 { return cpu.b; }
     else if idx == 1 { return cpu.c; }
@@ -150,6 +172,7 @@ func R8Get(cpu: *var Cpu, bus: *var Bus, idx: uint8) -> uint8 {
     else { return cpu.a; }
 }
 
+/// r8 インデックスへレジスタ(または (HL))の値を書く。
 func R8Set(cpu: *var Cpu, bus: *var Bus, idx: uint8, v: uint8) {
     if idx == 0 { cpu.b = v; }
     else if idx == 1 { cpu.c = v; }
@@ -163,6 +186,7 @@ func R8Set(cpu: *var Cpu, bus: *var Bus, idx: uint8, v: uint8) {
 
 // --- rp16 インデックス (0=BC,1=DE,2=HL,3=SP) ---
 
+/// rp16 インデックスから16bitレジスタペアを読む。
 func RpGet(cpu: *Cpu, idx: uint8) -> uint16 {
     if idx == 0 { return CpuBc(cpu); }
     else if idx == 1 { return CpuDe(cpu); }
@@ -170,6 +194,7 @@ func RpGet(cpu: *Cpu, idx: uint8) -> uint16 {
     else { return cpu.sp; }
 }
 
+/// rp16 インデックスへ16bitレジスタペアを書く。
 func RpSet(cpu: *var Cpu, idx: uint8, v: uint16) {
     if idx == 0 { CpuSetBc(cpu, v); }
     else if idx == 1 { CpuSetDe(cpu, v); }
@@ -179,11 +204,13 @@ func RpSet(cpu: *var Cpu, idx: uint8, v: uint16) {
 
 // --- rp2 インデックス (PUSH/POP 用。0=BC,1=DE,2=HL,3=AF) ---
 
+/// rp2 インデックス(PUSH/POP用)から16bitレジスタペアを読む。
 func Rp2Get(cpu: *Cpu, idx: uint8) -> uint16 {
     if idx == 3 { return CpuAf(cpu); }
     return RpGet(cpu, idx);
 }
 
+/// rp2 インデックス(PUSH/POP用)へ16bitレジスタペアを書く。
 func Rp2Set(cpu: *var Cpu, idx: uint8, v: uint16) {
     if idx == 3 {
         CpuSetAf(cpu, v);
@@ -194,6 +221,7 @@ func Rp2Set(cpu: *var Cpu, idx: uint8, v: uint16) {
 
 // --- 条件コード (0=NZ,1=Z,2=NC,3=C) ---
 
+/// 条件コードインデックスを評価する。
 func CcTest(cpu: *Cpu, idx: uint8) -> bool {
     if idx == 0 { return !CpuFlagZ(cpu); }
     else if idx == 1 { return CpuFlagZ(cpu); }
@@ -203,6 +231,7 @@ func CcTest(cpu: *Cpu, idx: uint8) -> bool {
 
 // --- スタック操作 ---
 
+/// SP を2減らし、16bit値をスタックへ push する。
 func Push16(cpu: *var Cpu, bus: *var Bus, v: uint16) {
     cpu.sp -= 1;
     CpuWrite8(cpu, bus, cpu.sp, (v >> 8) as uint8);
@@ -210,6 +239,7 @@ func Push16(cpu: *var Cpu, bus: *var Bus, v: uint16) {
     CpuWrite8(cpu, bus, cpu.sp, v as uint8);
 }
 
+/// スタックから16bit値を pop し、SP を2増やす。
 func Pop16(cpu: *var Cpu, bus: *var Bus) -> uint16 {
     let lo = CpuRead8(cpu, bus, cpu.sp);
     cpu.sp += 1;
@@ -218,8 +248,8 @@ func Pop16(cpu: *var Cpu, bus: *var Bus) -> uint16 {
     return (hi as uint16 << 8) | (lo as uint16);
 }
 
-// sp_add_offset は ADD SP,e8 / LD HL,SP+e8 共通のフラグ計算。
-// Z=0, N=0 固定。H/C は SP の下位バイトに符号なしの e8 を加算した結果の桁上がりで決まる
+/// ADD SP,e8 / LD HL,SP+e8 共通のフラグ計算。Z=0, N=0 固定。H/C は SP の
+/// 下位バイトに符号なしの e8 を加算した結果の桁上がりで決まる。
 func SpAddOffset(cpu: *var Cpu, bus: *var Bus) -> uint16 {
     let e8 = ReadImm8(cpu, bus);
     let sp = cpu.sp;
@@ -240,6 +270,7 @@ func SpAddOffset(cpu: *var Cpu, bus: *var Bus) -> uint16 {
 
 // --- 8bit ALU ヘルパー ---
 
+/// ADD/ADC A,v。
 func AluAdd(cpu: *var Cpu, v: uint8, carryIn: uint) {
     let a = cpu.a as uint;
     let sum = a + (v as uint) + carryIn;
@@ -248,6 +279,7 @@ func AluAdd(cpu: *var Cpu, v: uint8, carryIn: uint) {
     CpuSetFlags(cpu, cpu.a == 0, false, h, sum > 0xFF);
 }
 
+/// SUB/SBC/CP A,v。`store=false` のとき CP として結果をAへ書き戻さない。
 func AluSub(cpu: *var Cpu, v: uint8, carryIn: uint, store: bool) {
     let a = cpu.a as uint;
     let subtrahend = (v as uint) + carryIn;
@@ -261,21 +293,25 @@ func AluSub(cpu: *var Cpu, v: uint8, carryIn: uint, store: bool) {
     }
 }
 
+/// AND A,v。
 func AluAnd(cpu: *var Cpu, v: uint8) {
     cpu.a = cpu.a & v;
     CpuSetFlags(cpu, cpu.a == 0, false, true, false);
 }
 
+/// OR A,v。
 func AluOr(cpu: *var Cpu, v: uint8) {
     cpu.a = cpu.a | v;
     CpuSetFlags(cpu, cpu.a == 0, false, false, false);
 }
 
+/// XOR A,v。
 func AluXor(cpu: *var Cpu, v: uint8) {
     cpu.a = cpu.a ^ v;
     CpuSetFlags(cpu, cpu.a == 0, false, false, false);
 }
 
+/// INC r8(Carryフラグは変化しない)。
 func AluInc8(cpu: *var Cpu, v: uint8) -> uint8 {
     let result = v + 1;
     let h = (v & 0xF) + 1 > 0xF;
@@ -283,6 +319,7 @@ func AluInc8(cpu: *var Cpu, v: uint8) -> uint8 {
     return result;
 }
 
+/// DEC r8(Carryフラグは変化しない)。
 func AluDec8(cpu: *var Cpu, v: uint8) -> uint8 {
     let result = v - 1;
     let h = (v & 0xF) == 0;
@@ -290,6 +327,7 @@ func AluDec8(cpu: *var Cpu, v: uint8) -> uint8 {
     return result;
 }
 
+/// DAA(直前のADD/SUB結果をBCDへ補正する)。
 func CpuDaa(cpu: *var Cpu) {
     let n = CpuFlagN(cpu);
     let h = CpuFlagH(cpu);
@@ -314,10 +352,13 @@ func CpuDaa(cpu: *var Cpu) {
     CpuSetFlags(cpu, cpu.a == 0, n, false, setC);
 }
 
+/// IF & IE の下位5bit(受理待ちの割り込み種別ビット)を返す。
 func InterruptPending(bus: *Bus) -> uint8 {
     return (bus.io[0x0F] & 0x1F) & (bus.ie & 0x1F);
 }
 
+/// IME=1 かつ保留中の割り込みがあれば1件受理してベクタへジャンプする。
+/// 受理した場合はtrueを返す(呼び出し側はこのステップの命令フェッチを行わない)。
 func HandleInterrupts(cpu: *var Cpu, bus: *var Bus) -> bool {
     if !cpu.ime || InterruptPending(bus) == 0 {
         return false;
@@ -362,7 +403,7 @@ func HandleInterrupts(cpu: *var Cpu, bus: *var Bus) -> bool {
     return true;
 }
 
-// cpu_step は 1 命令を実行し、消費した T-cycle 数を返す
+/// 1命令を実行し、消費した T-cycle 数を返す。HALT/割り込み受理も含む。
 pub func CpuStep(cpu: *var Cpu, bus: *var Bus) -> int {
     let start = bus.cycles;
 
@@ -406,6 +447,7 @@ pub func CpuStep(cpu: *var Cpu, bus: *var Bus) -> int {
     return (bus.cycles - start) as int;
 }
 
+/// ALU演算グループ(op=0..7: ADD,ADC,SUB,SBC,AND,XOR,OR,CP)を1つ実行する。
 func CpuAluOp(cpu: *var Cpu, op: uint8, v: uint8) {
     if op == 0 { AluAdd(cpu, v, 0); }
     else if op == 1 { AluAdd(cpu, v, CpuFlagC(cpu) ? 1u : 0u); }
@@ -417,6 +459,7 @@ func CpuAluOp(cpu: *var Cpu, op: uint8, v: uint8) {
     else { AluSub(cpu, v, 0, false); } // CP
 }
 
+/// CBプレフィックスの回転/シフトグループ(op=0..7: RLC,RRC,RL,RR,SLA,SRA,SWAP,SRL)。
 func CbRotateShift(cpu: *var Cpu, op: uint8, v: uint8) -> uint8 {
     var result: uint8 = 0;
     var carryOut = false;
@@ -451,6 +494,7 @@ func CbRotateShift(cpu: *var Cpu, op: uint8, v: uint8) -> uint8 {
     return result;
 }
 
+/// CBプレフィックス命令(0xCB xx)を1命令実行する。
 func CpuExecuteCb(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
     let group = opcode >> 6;
     let op = (opcode >> 3) & 7;
@@ -472,6 +516,7 @@ func CpuExecuteCb(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
     }
 }
 
+/// 非CBプレフィックスの1命令を実行する(オペコードは呼び出し側で読み取り済み)。
 pub func CpuExecute(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
     if opcode == 0x00 {
         // NOP

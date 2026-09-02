@@ -1,10 +1,15 @@
-// シリアル出力キャプチャ (T1-7)
+/// シリアル出力キャプチャ。Blargg 系テスト ROM が SB/SC 経由で結果文字列を
+/// 出力する経路を実クロック無しで模倣する(転送完了を即時に扱う)。
 
 import Core::Slice;
 
+/// SB(シリアル転送データ、FF01)。
 pub const SerialSb: uint16 = 0xFF01;
+/// SC(シリアル転送制御、FF02)。
 pub const SerialSc: uint16 = 0xFF02;
 
+/// SB/SC への書き込みを処理する。SC に転送開始(bit7=1)かつ内部クロック
+/// (bit0=1)が書かれた瞬間に SB の値をログへ積み、転送完了(bit7=0)を返す。
 pub func SerialWrite(bus: *var Bus, addr: uint16, value: uint8) {
     if addr == SerialSb {
         bus.io[0x01] = value;
@@ -22,6 +27,7 @@ pub func SerialWrite(bus: *var Bus, addr: uint16, value: uint8) {
     }
 }
 
+/// これまでにキャプチャしたシリアル出力を返す(テスト ROM の結果文字列)。
 pub func SerialGetLog(bus: *Bus) -> Slice<uint8> {
     return Slice<uint8> { data: @bus.serialLog[0], length: bus.serialLogLength };
 }

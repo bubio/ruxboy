@@ -1,16 +1,24 @@
-// メモリマップと M-cycle tick 駆動
+/// メモリマップと M-cycle tick 駆動。CPU の全メモリアクセスがここを通る。
 
 import Core::Slice;
 
+/// OAM のバイト数。
 pub const OamSize: uint = 160;
+/// VRAM のバイト数(DMG、CGBバンク未対応の Phase 1 時点のサイズ)。
 pub const VramSize: uint = 8192;
+/// WRAM のバイト数(バンク切替未対応の Phase 1 時点のサイズ)。
 pub const WramSize: uint = 8192;
+/// HRAM のバイト数。
 pub const HramSize: uint = 127;
+/// I/O レジスタ領域のバイト数(FF00-FF7F)。
 pub const IoSize: uint = 128;
 
-pub const RomCapacity: uint = 32768; // Phase 1: 32KiB ROM-only
+/// Phase 1 で許容する ROM の最大サイズ(32KiB、ROM-onlyカートリッジ)。
+pub const RomCapacity: uint = 32768;
+/// シリアル出力ログの最大バイト数(Blargg 系テストROMの結果文字列用)。
 pub const SerialLogCapacity: uint = 16384;
 
+/// メモリマップ全体と周辺デバイス(Timer/PPU/OAM DMA/Serial)の状態。
 pub struct Bus {
     pub mode: GbMode;
     pub rom: uint8[32768];
@@ -49,6 +57,8 @@ pub struct Bus {
     pub dmaPendingSource: uint16;
 }
 
+/// Bus を初期状態にする(全レジスタ0、ROM未ロード)。実 BIOS 相当の初期値は
+/// `BusPowerOn` で別途セットする。
 pub func BusInit(bus: *var Bus) {
     bus.mode = GbMode::Dmg;
     bus.romLength = 0;
@@ -77,6 +87,7 @@ pub func BusInit(bus: *var Bus) {
     }
 }
 
+/// ROM データを ROM 領域へロードする。空データや `RomCapacity` 超過は失敗する。
 pub func BusLoadRom(bus: *var Bus, data: Slice<uint8>) -> bool {
     if data.length == 0 || data.length > RomCapacity {
         return false;
@@ -90,11 +101,14 @@ pub func BusLoadRom(bus: *var Bus, data: Slice<uint8>) -> bool {
     return true;
 }
 
+/// ブート ROM 完了直後の IO レジスタ状態を直接セットする(実 BIOS ROM は読み
+/// 込まない方針のため)。現時点では PPU レジスタのみ。
 pub func BusPowerOn(bus: *var Bus) {
     PpuPowerOn(@bus.ppu);
 }
 
-// bus_tick は t_cycles ぶん時間を進める。CPU の全メモリアクセスごとに呼ばれる。
+/// t_cycles ぶん時間を進める。CPU の全メモリアクセスごとに呼ばれ、
+/// Timer/PPU/OAM DMA を駆動する唯一の場所。
 pub func BusTick(bus: *var Bus, tCycles: int) {
     let cyclesU = tCycles as uint64;
     bus.cycles += cyclesU;
@@ -110,10 +124,10 @@ pub func BusTick(bus: *var Bus, tCycles: int) {
     }
 }
 
-// dma_tick_one_mcycle は OAM DMA を1 M-cycleぶん進める。
-// 開始タイミング: M0でFF46書き込み(dma_start_delay=2をセットするのみ)、M1では
-// まだ何も起きない、M2で新しい転送が開始し以後1バイト/M-cycleで160 M-cycleかけて
-// 転送する。
+/// OAM DMA を1 M-cycleぶん進める。
+/// 開始タイミング: M0でFF46書き込み(dma_start_delay=2をセットするのみ)、M1では
+/// まだ何も起きない、M2で新しい転送が開始し以後1バイト/M-cycleで160 M-cycleかけて
+/// 転送する。
 func DmaTickOneMcycle(bus: *var Bus) {
     if bus.dmaStartDelay > 0 {
         bus.dmaStartDelay -= 1;
@@ -133,6 +147,8 @@ func DmaTickOneMcycle(bus: *var Bus) {
     }
 }
 
+/// TAC の下位2bitから、DIV(16bit divider)のどのビットの立ち下がりで
+/// TIMA が増分するかを返す。
 func TimerSelectedBit(tac: uint8) -> uint {
     let speed = tac & 0x03;
     if speed == 0 { return 9; }
@@ -141,11 +157,14 @@ func TimerSelectedBit(tac: uint8) -> uint {
     return 7;
 }
 
+/// タイマーが有効(TAC bit2=1)なときの、選択ビットの現在値(falling-edge検出用)。
 func TimerSignal(divider: uint16, tac: uint8) -> bool {
     if (tac & 0x04) == 0 { return false; }
     return (divider & ((1 as uint16) << TimerSelectedBit(tac))) != 0;
 }
 
+/// TIMA を1増やす。オーバーフロー(0xFF→0x00)した場合は4 T-cycle後の
+/// TMA リロードを予約する(即座にはリロードしない、実機の遅延を再現)。
 func TimerIncrementTima(bus: *var Bus) {
     if bus.timerReloadPending > 0 { return; }
     if bus.tima == 0xFF {
@@ -156,6 +175,8 @@ func TimerIncrementTima(bus: *var Bus) {
     }
 }
 
+/// 予約済みの TMA リロードを1 T-cycleぶん進める。0に達したら TIMA=TMA とし、
+/// タイマー割り込み(IF bit2)を要求する。
 func TimerAdvanceReload(bus: *var Bus) {
     if bus.timerReloadPending <= 0 { return; }
     if bus.timerReloadPending == 1 {
@@ -168,6 +189,8 @@ func TimerAdvanceReload(bus: *var Bus) {
     }
 }
 
+/// DIV/TIMA を tCycles ぶん、1 T-cycleずつ進める(falling-edge検出の
+/// 取りこぼしを防ぐため、まとめて計算せず逐次進める)。
 func TimerTick(bus: *var Bus, tCycles: int) {
     bus.timerReloadJustHappened = false;
     var cycle: int = 0;
@@ -183,8 +206,8 @@ func TimerTick(bus: *var Bus, tCycles: int) {
     }
 }
 
-// OAM DMA 中は CPU からの OAM 領域(FE00-FE9F)読み出しが 0xFF に化ける
-// (DMA自身の内部読み出しはこの制限を受けない BusReadRaw を直接使う)。
+/// CPU からの読み出し。OAM DMA 中は OAM 領域(FE00-FE9F)読み出しが 0xFF に
+/// 化ける(DMA自身の内部読み出しはこの制限を受けない `BusReadRaw` を直接使う)。
 pub func BusRead(bus: *Bus, addr: uint16) -> uint8 {
     if bus.dmaActive && addr >= 0xFE00 && addr <= 0xFE9F {
         return 0xFF;
@@ -192,6 +215,7 @@ pub func BusRead(bus: *Bus, addr: uint16) -> uint8 {
     return BusReadRaw(bus, addr);
 }
 
+/// OAM DMA によるバス競合を受けない生の読み出し。メモリマップ全域を解決する。
 pub func BusReadRaw(bus: *Bus, addr: uint16) -> uint8 {
     if addr <= 0x7FFF {
         if (addr as uint) < bus.romLength {
@@ -219,7 +243,8 @@ pub func BusReadRaw(bus: *Bus, addr: uint16) -> uint8 {
     }
 }
 
-// OAM DMA 中は OAM 領域(FE00-FE9F)自身への書き込みだけを無視する。
+/// CPU からの書き込み。OAM DMA 中は OAM 領域(FE00-FE9F)自身への書き込み
+/// だけを無視する。
 pub func BusWrite(bus: *var Bus, addr: uint16, value: uint8) {
     if bus.dmaActive && addr >= 0xFE00 && addr <= 0xFE9F {
         return;
@@ -247,6 +272,7 @@ pub func BusWrite(bus: *var Bus, addr: uint16, value: uint8) {
     }
 }
 
+/// I/O レジスタ領域(FF00-FF7F)の読み出しをレジスタごとに振り分ける。
 func BusIoRead(bus: *Bus, addr: uint16) -> uint8 {
     if addr == 0xFF04 {
         return (bus.divCounter >> 8) as uint8;
@@ -267,6 +293,7 @@ func BusIoRead(bus: *Bus, addr: uint16) -> uint8 {
     return 0xFF;
 }
 
+/// I/O レジスタ領域(FF00-FF7F)の書き込みをレジスタごとに振り分ける。
 func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
     if addr == 0xFF04 {
         let oldSignal = TimerSignal(bus.divCounter, bus.tac);
@@ -309,11 +336,14 @@ func BusIoWrite(bus: *var Bus, addr: uint16, value: uint8) {
 }
 
 // --- CPU 側のメモリアクセス経路 ---
+
+/// CPU からの1バイト読み出し。4 T-cycle 消費してから読む。
 pub func CpuRead8(cpu: *Cpu, bus: *var Bus, addr: uint16) -> uint8 {
     BusTick(bus, 4);
     return BusRead(bus, addr);
 }
 
+/// CPU からの1バイト書き込み。4 T-cycle 消費してから書く。
 pub func CpuWrite8(cpu: *Cpu, bus: *var Bus, addr: uint16, value: uint8) {
     BusTick(bus, 4);
     BusWrite(bus, addr, value);

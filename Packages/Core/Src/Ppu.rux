@@ -1,59 +1,101 @@
-// PPU: LCD レジスタ、モードタイミング、BG/ウィンドウ/スプライト描画（DMG）。
-// VRAM/OAM は Bus 側に持つ（Ppu 自体には持たない）。
+/// PPU: LCD レジスタ、モードタイミング、BG/ウィンドウ/スプライト描画(DMG)。
+/// VRAM/OAM は Bus 側に持つ(Ppu 自体には持たない)。
 
+/// LCDC(LCD Control、FF40)。
 pub const LcdcAddr: uint16 = 0xFF40;
+/// STAT(LCD Status、FF41)。
 pub const StatAddr: uint16 = 0xFF41;
+/// SCY(BGスクロールY、FF42)。
 pub const ScyAddr: uint16 = 0xFF42;
+/// SCX(BGスクロールX、FF43)。
 pub const ScxAddr: uint16 = 0xFF43;
+/// LY(現在の走査線、FF44、読み取り専用)。
 pub const LyAddr: uint16 = 0xFF44;
+/// LYC(LY比較値、FF45)。
 pub const LycAddr: uint16 = 0xFF45;
+/// BGP(BGパレット、FF47)。
 pub const BgpAddr: uint16 = 0xFF47;
+/// OBP0(スプライトパレット0、FF48)。
 pub const Obp0Addr: uint16 = 0xFF48;
+/// OBP1(スプライトパレット1、FF49)。
 pub const Obp1Addr: uint16 = 0xFF49;
+/// WY(ウィンドウY、FF4A)。
 pub const WyAddr: uint16 = 0xFF4A;
+/// WX(ウィンドウX+7、FF4B)。
 pub const WxAddr: uint16 = 0xFF4B;
 
+/// LCDC bit7: LCD/PPU 全体の有効化。
 pub const LcdcBitLcdEnable: uint8 = 0x80;
+/// LCDC bit6: ウィンドウタイルマップ選択(0=0x9800, 1=0x9C00)。
 pub const LcdcBitWinMap: uint8 = 0x40;
+/// LCDC bit5: ウィンドウ有効化。
 pub const LcdcBitWinEnable: uint8 = 0x20;
+/// LCDC bit4: BG/ウィンドウのタイルデータ基点選択(0=0x8800 signed, 1=0x8000 unsigned)。
 pub const LcdcBitBgWinTiles: uint8 = 0x10;
+/// LCDC bit3: BGタイルマップ選択(0=0x9800, 1=0x9C00)。
 pub const LcdcBitBgMap: uint8 = 0x08;
+/// LCDC bit2: スプライトサイズ(0=8x8, 1=8x16)。
 pub const LcdcBitObjSize: uint8 = 0x04;
+/// LCDC bit1: スプライト有効化。
 pub const LcdcBitObjEnable: uint8 = 0x02;
+/// LCDC bit0: BG/ウィンドウ有効化(DMG)。
 pub const LcdcBitBgEnable: uint8 = 0x01;
 
+/// STAT bit6: LYC一致割り込み許可。
 pub const StatBitLycInt: uint8 = 0x40;
+/// STAT bit5: モード2(OAM scan)割り込み許可。
 pub const StatBitOamInt: uint8 = 0x20;
+/// STAT bit4: モード1(VBlank)割り込み許可。
 pub const StatBitVblankInt: uint8 = 0x10;
+/// STAT bit3: モード0(HBlank)割り込み許可。
 pub const StatBitHblankInt: uint8 = 0x08;
+/// STAT bit2: LYC==LY の比較結果。
 pub const StatBitLycEq: uint8 = 0x04;
+/// STAT のうち書き込みが反映されるビット(bit6-3のみ)。
 pub const StatWritableMask: uint8 = 0x78;
 
+/// OAM属性 bit7: BG優先(BGカラー1-3の上に描画しない)。
 pub const OamAttrBgPriority: uint8 = 0x80;
+/// OAM属性 bit6: 垂直フリップ。
 pub const OamAttrYFlip: uint8 = 0x40;
+/// OAM属性 bit5: 水平フリップ。
 pub const OamAttrXFlip: uint8 = 0x20;
+/// OAM属性 bit4: パレット選択(0=OBP0, 1=OBP1)。
 pub const OamAttrPalette: uint8 = 0x10;
 
-// PPU モード。STAT bit1-0 と同じ数値。
+/// PPU モード0(HBlank)。STAT bit1-0 と同じ数値。
 pub const ModeHBlank: uint8 = 0;
+/// PPU モード1(VBlank)。
 pub const ModeVBlank: uint8 = 1;
+/// PPU モード2(OAM scan)。
 pub const ModeOamScan: uint8 = 2;
+/// PPU モード3(描画)。
 pub const ModeDraw: uint8 = 3;
 
 const IntrVBlankBit: uint8 = 0x01;
 const IntrStatBit: uint8 = 0x02;
 
+/// DMGシェード0(最も明るい)。
 pub const DmgShade0: uint32 = 0xFFFFFFFF;
+/// DMGシェード1。
 pub const DmgShade1: uint32 = 0xFFAAAAAA;
+/// DMGシェード2。
 pub const DmgShade2: uint32 = 0xFF555555;
+/// DMGシェード3(最も暗い)。
 pub const DmgShade3: uint32 = 0xFF000000;
 
+/// 1ラインあたりの T-cycle 数。
 pub const CyclesPerLine: int = 456;
+/// モード2(OAM scan)の長さ(T-cycle)。
 pub const Mode2Dots: int = 80;
+/// モード3(描画)の長さ(T-cycle、固定長。可変長のペナルティは実装しない)。
 pub const Mode3Dots: int = 172;
+/// 1フレームのライン数(可視144 + VBlank10)。
 pub const LinesPerFrame: int = 154;
+/// VBlank突入ライン(LY=144)。
 pub const VblankStartLine: int = 144;
 
+/// PPU のレジスタ・内部状態・フレームバッファ一式。
 pub struct Ppu {
     pub lcdc: uint8;
     pub statEnable: uint8;
@@ -77,10 +119,13 @@ pub struct Ppu {
     pub bgColorIndex: uint8[160]; // 直近描画したラインのカラー番号(パレット適用前)
 }
 
+/// STAT bit2(LYC==LY)を LY/LYC の現在値から再計算する。
 func PpuUpdateLycEqual(ppu: *var Ppu) {
     ppu.lycEqual = ppu.ly == ppu.lyc;
 }
 
+/// DMGブート後の PPU レジスタ初期値をセットする(実 BIOS ROM は読み込まない
+/// 方針のため、post-boot 値を直接書き込む)。
 pub func PpuPowerOn(ppu: *var Ppu) {
     ppu.lcdc = 0x91;
     ppu.statEnable = 0;
@@ -100,6 +145,8 @@ pub func PpuPowerOn(ppu: *var Ppu) {
     PpuUpdateLycEqual(ppu);
 }
 
+/// LCDC/STAT/SCY/SCX/LY/LYC/BGP/OBP0/OBP1/WY/WX の読み出し(FF46=OAM DMAは
+/// Bus 側で処理するため対象外)。STAT はbit7固定1・LYC一致・モードを合成する。
 pub func PpuRead(bus: *Bus, addr: uint16) -> uint8 {
     let ppu = @bus.ppu;
     if addr == LcdcAddr {
@@ -132,6 +179,7 @@ pub func PpuRead(bus: *Bus, addr: uint16) -> uint8 {
     return 0xFF;
 }
 
+/// LCDC bit7が0→1になったときの初期化(ラインの先頭から再開)。
 func PpuEnable(ppu: *var Ppu) {
     ppu.ly = 0;
     ppu.dot = 0;
@@ -140,6 +188,7 @@ func PpuEnable(ppu: *var Ppu) {
     PpuUpdateLycEqual(ppu);
 }
 
+/// LCDC bit7が1→0になったときの状態固定(LY=0・モード0)。
 func PpuDisable(ppu: *var Ppu) {
     ppu.ly = 0;
     ppu.dot = 0;
@@ -149,6 +198,9 @@ func PpuDisable(ppu: *var Ppu) {
     // 再計算が起きるのは PpuEnable(比較器の再起動)のときだけ。
 }
 
+/// STAT blocking用の「現在成立している割り込み条件の OR」を返す:
+/// LYC一致・モード2・モード1(VBlank)・モード0(HBlank)。モード3には対応する
+/// STAT割り込み源が無い。
 func PpuStatConditionLine(ppu: *Ppu) -> bool {
     if ppu.lycEqual && (ppu.statEnable & StatBitLycInt) != 0 {
         return true;
@@ -163,6 +215,8 @@ func PpuStatConditionLine(ppu: *Ppu) -> bool {
     return false; // Draw
 }
 
+/// STAT blocking(立ち上がりエッジでのみ発火)を実装する。STAT/LYC/LCDCへの
+/// 書き込み後と、PpuTickでのモード/LY変化後の両方で呼ぶ。
 func PpuUpdateStatIrq(bus: *var Bus) {
     let line = PpuStatConditionLine(@bus.ppu);
     if line && !bus.ppu.statIrqLine {
@@ -171,6 +225,8 @@ func PpuUpdateStatIrq(bus: *var Bus) {
     bus.ppu.statIrqLine = line;
 }
 
+/// LCDC/STAT/SCY/SCX/LY/LYC/BGP/OBP0/OBP1/WY/WX の書き込み(FF46=OAM DMAは
+/// Bus 側で処理するため対象外)。LYへの書き込みは無視する(リセットではない)。
 pub func PpuWrite(bus: *var Bus, addr: uint16, value: uint8) {
     if addr == LcdcAddr {
         let wasEnabled = (bus.ppu.lcdc & LcdcBitLcdEnable) != 0;
@@ -212,6 +268,7 @@ pub func PpuWrite(bus: *var Bus, addr: uint16, value: uint8) {
     }
 }
 
+/// 現在の LY/dot から PPU モードを決める。
 func PpuModeFor(ly: uint8, dot: int) -> uint8 {
     if (ly as int) >= VblankStartLine {
         return ModeVBlank;
@@ -225,6 +282,7 @@ func PpuModeFor(ly: uint8, dot: int) -> uint8 {
     return ModeHBlank;
 }
 
+/// BGP/OBPnから取り出した2bitシェード番号(0-3)を DMG 4階調のARGBへ変換する。
 func DmgShade(shade: uint8) -> uint32 {
     let s = shade & 0x03;
     if s == 0 {
@@ -237,6 +295,8 @@ func DmgShade(shade: uint8) -> uint32 {
     return DmgShade3;
 }
 
+/// タイルインデックスからタイルデータの先頭アドレスを求める。
+/// LCDC bit4=1: 0x8000起点のunsigned index。bit4=0: 0x9000起点のsigned index。
 func BgTileDataAddr(lcdc: uint8, tileIndex: uint8, rowInTile: int) -> uint16 {
     if (lcdc & LcdcBitBgWinTiles) != 0 {
         return (0x8000 + (tileIndex as int) * 16 + rowInTile * 2) as uint16;
@@ -245,6 +305,8 @@ func BgTileDataAddr(lcdc: uint8, tileIndex: uint8, rowInTile: int) -> uint16 {
     return (0x9000 + signedIndex * 16 + rowInTile * 2) as uint16;
 }
 
+/// VRAM上の2bppタイルデータ1行から指定列のカラー番号(0-3、パレット適用前)を
+/// 取り出す。bit7が左端ピクセル。
 func TilePixelColorNumber(bus: *Bus, tileAddr: uint16, colInTile: int) -> uint8 {
     let low = bus.vram[(tileAddr - 0x8000) as uint];
     let high = bus.vram[(tileAddr - 0x8000 + 1) as uint];
@@ -254,6 +316,7 @@ func TilePixelColorNumber(bus: *Bus, tileAddr: uint16, colInTile: int) -> uint8 
     return lowBit | (highBit << 1);
 }
 
+/// タイルマップ上の座標(sourceX, sourceY)が指すタイルのカラー番号を解決する。
 func TileMapPixelColorNumber(bus: *Bus, mapBase: uint16, lcdc: uint8, sourceX: int, sourceY: int) -> uint8 {
     let tileCol = sourceX / 8;
     let tileRow = sourceY / 8;
@@ -267,6 +330,9 @@ func TileMapPixelColorNumber(bus: *Bus, mapBase: uint16, lcdc: uint8, sourceX: i
     return TilePixelColorNumber(bus, tileAddr, colInTile);
 }
 
+/// 1ライン分をframebufferに描く(BG→ウィンドウ→スプライトの順)。
+/// LCDC bit0=0のときBG・ウィンドウとも白一色になる(DMGではbit0がBG&ウィンドウ
+/// 全体の有効/無効を兼ねる)。スプライトはbit0とは独立にbit1で制御される。
 func PpuRenderScanline(bus: *var Bus) {
     let ly = bus.ppu.ly as int;
     if ly >= 144 {
@@ -323,6 +389,10 @@ func PpuRenderScanline(bus: *var Bus) {
     PpuRenderSprites(bus, lineStart);
 }
 
+/// このラインのスプライト(8x8/8x16)を優先度込みで描画する。
+/// OAM先頭から最大10個/ラインを収集し、DMGの優先度(X座標が小さいスプライトが
+/// 勝つ、同Xなら OAM 順)でソートする。一度確定したピクセルは他のスプライトに
+/// 上書きされない。スプライトのカラー0は常に透明。
 func PpuRenderSprites(bus: *var Bus, lineStart: uint) {
     if (bus.ppu.lcdc & LcdcBitObjEnable) == 0 {
         return;
@@ -446,6 +516,8 @@ func PpuRenderSprites(bus: *var Bus, lineStart: uint) {
     }
 }
 
+/// tCycles ぶん PPU の状態を進める。LY/モード遷移のエッジをまたぐ変化を
+/// 見落とさないため1 T-cycleずつ進める。LCDC bit7=0の間は完全に停止する。
 pub func PpuTick(bus: *var Bus, tCycles: int) {
     if (bus.ppu.lcdc & LcdcBitLcdEnable) == 0 {
         return;

@@ -1,13 +1,20 @@
-// Hardware 定数
-// RuxBoy の全モジュールが参照する唯一の定義源
+/// Hardware 定数。
+/// RuxBoy の全モジュールが参照する唯一の定義源。
 
+/// 画面の横ピクセル数(160)。
 pub const ScreenWidth: int32 = 160;
+/// 画面の縦ピクセル数(144)。
 pub const ScreenHeight: int32 = 144;
 
+/// CPU クロック周波数(Hz)。
 pub const CpuHz: uint32 = 4194304;
+/// 1フレームあたりの T-cycle 数。
 pub const CyclesPerFrame: uint64 = 70224;
 
+/// エミュレート対象のハードウェアモード。
 pub enum GbMode {
+    /// Game Boy / Game Boy Color の DMG 互換モード。
     Dmg,
+    /// Game Boy Color 専用モード。
     Cgb
 }
