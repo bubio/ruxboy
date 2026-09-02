@@ -1,0 +1,487 @@
+/// MBC(メモリバンクコントローラ)の状態と読み書き。`Bus`の0000-7FFF(ROM)・
+/// A000-BFFF(外部RAM)はこのファイルの`MbcRead`/`MbcWrite`を経由する。
+///
+/// 表現方法(Odin版は tagged union `Mbc_State`): Rux には `variant`(閉じたタグ
+/// 付き共用体)があるが、タグは非公開でありシリアライズ不可
+/// (Language.md「variantのタグ番号は絶対に直接シリアライズするな」)。
+/// フェーズ7(セーブステート)での変換層を避けるため、`Mbc`はタグ(`kind`)+
+/// 全フィールドを持つフラットな構造体として表現する。`Bus`が`Ppu`等の状態を
+/// フラット構造体で持ち回す既存方針(PLAN.md 1.2)とも一致する。
+
+import Core::Slice;
+
+pub const RomBankSize: uint = 0x4000;
+pub const RamBankSize: uint = 0x2000;
+/// 外部RAMの最大容量(0x0149コード0x04=128KiB)。
+pub const CartridgeRamCapacity: uint = 131072;
+
+pub const RtcSecondsPerDay: uint64 = 24 * 60 * 60;
+/// DHのbit0が日カウンタbit8(9bit=0-511)。
+pub const RtcMaxDays: uint64 = 512;
+
+/// 1本のロード済みカートリッジ(ヘッダ情報 + ROM + 外部RAM + MBC状態)。
+pub struct Cartridge {
+    pub info: CartridgeInfo;
+    /// 借用。所有権は呼び出し側に残る。
+    pub rom: Slice<uint8>;
+    /// 外部RAM(最大128KiB)。MBC2は先頭512バイトのみ使用する。
+    pub ram: uint8[131072];
+    pub ramLength: uint;
+    /// 実書き込みでのみ立つ(バッテリーセーブの保存タイミング判定用)。
+    pub ramDirty: bool;
+    pub mbc: Mbc;
+}
+
+/// MBC状態。フィールドは種別ごとに使い分ける(コメント参照)。
+pub struct Mbc {
+    pub kind: MbcKind;
+    /// 0000-1FFF: 下位4bit=0x0Aで有効(MBC1/2/3/5共通)。
+    pub ramEnabled: bool;
+
+    // --- MBC1 ---
+    /// 2000-3FFF: 下位5bit(0は1に読み替え済みの値を保持)。
+    pub romBankLow5: uint8;
+    /// 4000-5FFF: 上位2bit(0-3)。
+    pub bankHigh2: uint8;
+    /// 6000-7FFF。false=Romモード(既定、0000-3FFFは常にバンク0)、
+    /// true=Ramモード(0000-3FFF/外部RAMバンクにも上位2bitが効く)。
+    pub ramMode: bool;
+
+    // --- MBC2/MBC3共通(単一バンクレジスタ) ---
+    /// MBC2: 下位4bit(0は1に読み替え)。MBC3: 下位7bit(0は1に読み替え)。
+    pub romBank: uint8;
+
+    // --- MBC3(+RTC) ---
+    /// 4000-5FFF: 0x00-0x03=RAMバンク、0x08-0x0C=RTCレジスタ(S/M/H/DL/DH)。
+    pub ramOrRtcSelect: uint8;
+    /// ライブレジスタ(進行中の現在時刻)。index: 0=S,1=M,2=H,3=DL,4=DH。
+    pub rtc: uint8[5];
+    /// 直近ラッチのスナップショット。CPUからの読み出しはこちら。
+    pub latchedRtc: uint8[5];
+    /// 6000-7FFFへ0x00を書いた直後(次に0x01が来たらラッチ)。
+    pub latchPrepared: bool;
+    /// 直近に`MbcSyncWallClock`で供給されたUNIX秒。0=未同期センチネル。
+    pub rtcBaseUnix: uint64;
+
+    // --- MBC5 ---
+    /// 2000-2FFF: ROMバンク下位8bit。
+    pub romBankLow8: uint8;
+    /// 3000-3FFF: ROMバンクbit8(0-1)。500バンク超のROM向け。
+    pub romBankHigh1: uint8;
+    /// 4000-5FFF: RAMバンク(0-15)。
+    pub ramBank: uint8;
+}
+
+/// `cart`をROM未ロードの初期状態にする。
+pub func CartridgeReset(cart: *var Cartridge) {
+    cart.info.mbcKind = MbcKind::RomOnly;
+    cart.info.romBanks = 0;
+    cart.info.ramSize = 0;
+    cart.info.hasBattery = false;
+    cart.info.hasRtc = false;
+    cart.info.cgbFlag = CgbFlag::DmgOnly;
+    cart.info.typeCode = 0;
+
+    cart.rom = Slice<uint8> { data: null, length: 0 };
+    cart.ramLength = 0;
+    cart.ramDirty = false;
+
+    var i: uint = 0;
+    while i < CartridgeRamCapacity {
+        cart.ram[i] = 0;
+        i += 1;
+    }
+
+    cart.mbc.kind = MbcKind::RomOnly;
+    cart.mbc.ramEnabled = false;
+    cart.mbc.romBankLow5 = 1;
+    cart.mbc.bankHigh2 = 0;
+    cart.mbc.ramMode = false;
+    cart.mbc.romBank = 1;
+    cart.mbc.ramOrRtcSelect = 0;
+    var j: uint = 0;
+    while j < 5 {
+        cart.mbc.rtc[j] = 0;
+        cart.mbc.latchedRtc[j] = 0;
+        j += 1;
+    }
+    cart.mbc.latchPrepared = false;
+    cart.mbc.rtcBaseUnix = 0;
+    cart.mbc.romBankLow8 = 1;
+    cart.mbc.romBankHigh1 = 0;
+    cart.mbc.ramBank = 0;
+}
+
+/// ヘッダを解析し、MBC種別に応じた初期状態を作る。romの所有権は呼び出し側に
+/// 残る(`cart.rom`はそれを指す借用スライス)。エラー時は`cart`をリセット済みの
+/// 状態のまま返す(errのみ見ればよい)。
+pub func CartridgeInit(cart: *var Cartridge, rom: Slice<uint8>) -> CartridgeParseError {
+    CartridgeReset(cart);
+
+    var info: CartridgeInfo;
+    let err = CartridgeParseHeader(rom, @info);
+    cart.info = info;
+    if err != CartridgeParseError::None {
+        return err;
+    }
+
+    cart.rom = rom;
+    cart.ramLength = info.ramSize;
+    cart.mbc.kind = info.mbcKind;
+
+    return CartridgeParseError::None;
+}
+
+// --- 共通ヘルパー(バンク境界の正規化) ---
+
+func NormalizedRomBank(cart: *Cartridge, bank: uint) -> uint {
+    if cart.info.romBanks == 0 { return 0; }
+    return bank % cart.info.romBanks;
+}
+
+func ReadRomBank(cart: *Cartridge, bank: uint, offset: uint16) -> uint8 {
+    let physical = NormalizedRomBank(cart, bank) * RomBankSize + (offset as uint);
+    if physical >= cart.rom.length { return 0xFF; }
+    return cart.rom.data[physical];
+}
+
+func MbcRamBankCount(cart: *Cartridge) -> uint {
+    if cart.ramLength == 0 { return 0; }
+    return cart.ramLength / RamBankSize;
+}
+
+func NormalizedRamBank(cart: *Cartridge, bank: uint) -> uint {
+    let count = MbcRamBankCount(cart);
+    if count == 0 { return 0; }
+    return bank % count;
+}
+
+func ReadRamBank(cart: *Cartridge, bank: uint, offset: uint16) -> uint8 {
+    if cart.ramLength == 0 { return 0xFF; }
+    let physical = NormalizedRamBank(cart, bank) * RamBankSize + (offset as uint);
+    if physical >= cart.ramLength { return 0xFF; }
+    return cart.ram[physical];
+}
+
+/// 実際にバイトを書き込んだ場合のみ`ramDirty`を立てる(RAM無効時の書き込みは
+/// 呼び出し元でガードされ、ここには到達しない)。
+func WriteRamBank(cart: *var Cartridge, bank: uint, offset: uint16, value: uint8) {
+    if cart.ramLength == 0 { return; }
+    let physical = NormalizedRamBank(cart, bank) * RamBankSize + (offset as uint);
+    if physical >= cart.ramLength { return; }
+    cart.ram[physical] = value;
+    cart.ramDirty = true;
+}
+
+// --- ROM only ---
+
+func MbcNoneRead(cart: *Cartridge, addr: uint16) -> uint8 {
+    if addr <= 0x7FFF {
+        if (addr as uint) < cart.rom.length { return cart.rom.data[addr as uint]; }
+        return 0xFF;
+    }
+    return 0xFF; // 0xA000-0xBFFF: ROM onlyは外部RAM無し
+}
+
+// --- MBC1 ---
+
+func Mbc1LowerBank(mbc: *Mbc) -> uint {
+    if mbc.ramMode { return (mbc.bankHigh2 as uint) << 5; }
+    return 0;
+}
+
+/// 4000-7FFFで選択されるバンク。「5bitレジスタが0なら1」の判定は書き込み時に
+/// 5bitマスク後で行い済み(`Mbc1Write`参照)。ここでの再チェックは防御的な
+/// 二重チェック(通常はraw&0x1Fが0になることはない)。
+func Mbc1UpperBank(mbc: *Mbc) -> uint {
+    var raw = ((mbc.bankHigh2 as uint) << 5) | (mbc.romBankLow5 as uint);
+    if (raw & 0x1F) == 0 { raw = raw | 1; }
+    return raw;
+}
+
+func Mbc1RamBank(mbc: *Mbc) -> uint {
+    if mbc.ramMode { return mbc.bankHigh2 as uint; }
+    return 0;
+}
+
+func Mbc1Read(cart: *Cartridge, addr: uint16) -> uint8 {
+    if addr <= 0x3FFF {
+        return ReadRomBank(cart, Mbc1LowerBank(@cart.mbc), addr);
+    } else if addr <= 0x7FFF {
+        return ReadRomBank(cart, Mbc1UpperBank(@cart.mbc), addr - 0x4000);
+    } else if addr >= 0xA000 && addr <= 0xBFFF {
+        if !cart.mbc.ramEnabled { return 0xFF; }
+        return ReadRamBank(cart, Mbc1RamBank(@cart.mbc), addr - 0xA000);
+    }
+    return 0xFF;
+}
+
+func Mbc1Write(cart: *var Cartridge, addr: uint16, value: uint8) {
+    if addr <= 0x1FFF {
+        cart.mbc.ramEnabled = (value & 0x0F) == 0x0A;
+    } else if addr <= 0x3FFF {
+        var low5 = value & 0x1F;
+        if low5 == 0 { low5 = 1; }
+        cart.mbc.romBankLow5 = low5;
+    } else if addr <= 0x5FFF {
+        cart.mbc.bankHigh2 = value & 0x03;
+    } else if addr <= 0x7FFF {
+        cart.mbc.ramMode = (value & 0x01) != 0;
+    } else if addr >= 0xA000 && addr <= 0xBFFF {
+        if cart.mbc.ramEnabled {
+            WriteRamBank(cart, Mbc1RamBank(@cart.mbc), addr - 0xA000, value);
+        }
+    }
+}
+
+// --- MBC2 ---
+
+/// A000-BFFF(0x2000バイト)を内蔵512バイトRAMに畳み込む。A000-A1FFが本体、
+/// A200-BFFFはエコー(0x200バイト境界で繰り返す、落とし穴)。
+func Mbc2RamIndex(addr: uint16) -> uint {
+    return ((addr - 0xA000) as uint) & 0x01FF;
+}
+
+func Mbc2Read(cart: *Cartridge, addr: uint16) -> uint8 {
+    if addr <= 0x3FFF {
+        return ReadRomBank(cart, 0, addr);
+    } else if addr <= 0x7FFF {
+        return ReadRomBank(cart, cart.mbc.romBank as uint, addr - 0x4000);
+    } else if addr >= 0xA000 && addr <= 0xBFFF {
+        if !cart.mbc.ramEnabled { return 0xFF; }
+        // 上位4bitは読むと1(0xF0)。実データは下位4bitのみ(落とし穴)。
+        return 0xF0 | (cart.ram[Mbc2RamIndex(addr)] & 0x0F);
+    }
+    return 0xFF;
+}
+
+/// 0000-3FFFはアドレスbit8でRAM有効化(bit8=0)/ROMバンク選択(bit8=1)を区別する
+/// (MBC1は別々のアドレス範囲で区別するのに対し、MBC2は同じ範囲内でbit8により
+/// 区別する点が異なる。落とし穴)。
+func Mbc2Write(cart: *var Cartridge, addr: uint16, value: uint8) {
+    if addr <= 0x3FFF {
+        if (addr & 0x0100) == 0 {
+            cart.mbc.ramEnabled = (value & 0x0F) == 0x0A;
+        } else {
+            var bank = value & 0x0F;
+            if bank == 0 { bank = 1; }
+            cart.mbc.romBank = bank;
+        }
+    } else if addr >= 0xA000 && addr <= 0xBFFF {
+        if cart.mbc.ramEnabled {
+            cart.ram[Mbc2RamIndex(addr)] = value & 0x0F;
+            cart.ramDirty = true;
+        }
+    }
+}
+
+// --- MBC3(+RTC) ---
+
+/// 4000-5FFFの選択値をRTCレジスタ配列のインデックスに変換する
+/// (0x08=S, 0x09=M, 0x0A=H, 0x0B=DL, 0x0C=DH)。RAMバンク選択(0x00-0x03)は
+/// ここではfalse。
+func Mbc3RtcIndex(select: uint8, idx: *var uint) -> bool {
+    if select >= 0x08 && select <= 0x0C {
+        *idx = (select - 0x08) as uint;
+        return true;
+    }
+    return false;
+}
+
+func Mbc3RtcHalted(mbc: *Mbc) -> bool {
+    return (mbc.rtc[4] & 0x40) != 0;
+}
+
+func Mbc3RtcTotalSeconds(mbc: *Mbc) -> uint64 {
+    let day = (mbc.rtc[3] as uint64) | ((mbc.rtc[4] as uint64 & 0x01) << 8);
+    return (mbc.rtc[0] as uint64) + (mbc.rtc[1] as uint64) * 60 + (mbc.rtc[2] as uint64) * 3600 + day * RtcSecondsPerDay;
+}
+
+/// total秒(0以上、512日未満に丸め済みであること)からS/M/H/DL/DHを再構築する。
+/// halted/carryはDHのbit6/bit7に反映する。
+func Mbc3SetRtcFromTotalSeconds(mbc: *var Mbc, total: uint64, carry: bool, halted: bool) {
+    let day = total / RtcSecondsPerDay;
+    let remainder = total % RtcSecondsPerDay;
+    let hour = remainder / 3600;
+    let remainder2 = remainder % 3600;
+    let minute = remainder2 / 60;
+    let second = remainder2 % 60;
+
+    var high: uint8 = 0;
+    if (day & 0x100) != 0 { high = high | 0x01; }
+    if halted { high = high | 0x40; }
+    if carry { high = high | 0x80; }
+
+    mbc.rtc[0] = second as uint8;
+    mbc.rtc[1] = minute as uint8;
+    mbc.rtc[2] = hour as uint8;
+    mbc.rtc[3] = (day & 0xFF) as uint8;
+    mbc.rtc[4] = high;
+}
+
+/// seconds秒(>0)をrtcに加算する。511日を超えたら512日で折り返し、桁あふれ
+/// フラグ(DH bit7)を立てる。halted中は呼び出し側(`Mbc3AdvanceRtc`)でガードする
+/// のでここでは常に加算する。
+func Mbc3AdvanceRtcRegisters(mbc: *var Mbc, seconds: uint64) {
+    let totalDaysSeconds = RtcMaxDays * RtcSecondsPerDay;
+    let currentTotal = Mbc3RtcTotalSeconds(mbc);
+    let advancedTotal = currentTotal + seconds;
+    let carry = ((mbc.rtc[4] & 0x80) != 0) || (advancedTotal >= totalDaysSeconds);
+    let wrappedTotal = advancedTotal % totalDaysSeconds;
+    Mbc3SetRtcFromTotalSeconds(mbc, wrappedTotal, carry, false);
+}
+
+/// 「基準UNIX時刻+経過秒」方式: `rtcBaseUnix`と`unixSeconds`の差分だけrtcを
+/// 進め、`rtcBaseUnix`を更新する。`rtcBaseUnix`==0(未同期センチネル)の場合は
+/// 基準点を打つだけで経過秒には加算しない。halt中(DH bit6=1)は`rtcBaseUnix`
+/// だけ更新し、レジスタは進めない(再開時に一気に進んでしまうのを防ぐ)。
+/// `unixSeconds`は符号なしのため、Odin版の`i64`引き算による符号付きオーバー
+/// フロー(debugビルドで致命的エラーになる、PLAN.md 1.2)を避け、逆行(時計を
+/// 巻き戻す入力)は基準点の更新のみ行い経過秒には加算しない。
+func Mbc3AdvanceRtc(mbc: *var Mbc, unixSeconds: uint64) {
+    if mbc.rtcBaseUnix == 0 || unixSeconds <= mbc.rtcBaseUnix {
+        mbc.rtcBaseUnix = unixSeconds;
+        return;
+    }
+
+    let elapsed = unixSeconds - mbc.rtcBaseUnix;
+    mbc.rtcBaseUnix = unixSeconds;
+
+    if Mbc3RtcHalted(mbc) { return; }
+    Mbc3AdvanceRtcRegisters(mbc, elapsed);
+}
+
+/// 壁時計からMBC3のRTCを進める。MBC3以外・RTC無しカートリッジでは何もしない。
+/// App側からフレームループ内で呼ばれる想定(フェーズ8)。
+pub func MbcSyncWallClock(cart: *var Cartridge, unixSeconds: uint64) {
+    if cart.mbc.kind != MbcKind::Mbc3 || !cart.info.hasRtc {
+        return;
+    }
+    Mbc3AdvanceRtc(@cart.mbc, unixSeconds);
+}
+
+/// CPUからの直接書き込み(初期時刻設定)を正規化する。
+func Mbc3NormalizeRtcRegister(idx: uint, value: uint8) -> uint8 {
+    if idx == 0 || idx == 1 { return value % 60; }
+    else if idx == 2 { return value % 24; }
+    else if idx == 3 { return value; }
+    else if idx == 4 { return value & 0xC1; } // bit0(日カウンタbit8)・bit6(停止)・bit7(桁あふれ)のみ
+    return value;
+}
+
+/// 6000-7FFFへの書き込みを処理する。「0x00を書いてから0x01」の遷移のみラッチ
+/// が発生する(落とし穴)。それ以外の値は`latchPrepared`をfalseにリセットする。
+func Mbc3Latch(mbc: *var Mbc, value: uint8) {
+    if value == 0x00 {
+        mbc.latchPrepared = true;
+    } else if value == 0x01 && mbc.latchPrepared {
+        var i: uint = 0;
+        while i < 5 {
+            mbc.latchedRtc[i] = mbc.rtc[i];
+            i += 1;
+        }
+        mbc.latchPrepared = false;
+    } else {
+        mbc.latchPrepared = false;
+    }
+}
+
+func Mbc3Read(cart: *Cartridge, addr: uint16) -> uint8 {
+    if addr <= 0x3FFF {
+        return ReadRomBank(cart, 0, addr);
+    } else if addr <= 0x7FFF {
+        return ReadRomBank(cart, cart.mbc.romBank as uint, addr - 0x4000);
+    } else if addr >= 0xA000 && addr <= 0xBFFF {
+        if !cart.mbc.ramEnabled { return 0xFF; }
+        var idx: uint = 0;
+        if Mbc3RtcIndex(cart.mbc.ramOrRtcSelect, @idx) {
+            if !cart.info.hasRtc { return 0xFF; }
+            return cart.mbc.latchedRtc[idx]; // 常にラッチ済みスナップショットを読む
+        }
+        if cart.mbc.ramOrRtcSelect <= 0x03 {
+            return ReadRamBank(cart, cart.mbc.ramOrRtcSelect as uint, addr - 0xA000);
+        }
+        return 0xFF;
+    }
+    return 0xFF;
+}
+
+func Mbc3Write(cart: *var Cartridge, addr: uint16, value: uint8) {
+    if addr <= 0x1FFF {
+        cart.mbc.ramEnabled = (value & 0x0F) == 0x0A;
+    } else if addr <= 0x3FFF {
+        var bank = value & 0x7F;
+        if bank == 0 { bank = 1; }
+        cart.mbc.romBank = bank;
+    } else if addr <= 0x5FFF {
+        cart.mbc.ramOrRtcSelect = value;
+    } else if addr <= 0x7FFF {
+        Mbc3Latch(@cart.mbc, value);
+    } else if addr >= 0xA000 && addr <= 0xBFFF {
+        if !cart.mbc.ramEnabled { return; }
+        var idx: uint = 0;
+        if Mbc3RtcIndex(cart.mbc.ramOrRtcSelect, @idx) {
+            if cart.info.hasRtc {
+                cart.mbc.rtc[idx] = Mbc3NormalizeRtcRegister(idx, value);
+            }
+        } else if cart.mbc.ramOrRtcSelect <= 0x03 {
+            WriteRamBank(cart, cart.mbc.ramOrRtcSelect as uint, addr - 0xA000, value);
+        }
+    }
+}
+
+// --- MBC5 ---
+
+func Mbc5RomBank(mbc: *Mbc) -> uint {
+    return ((mbc.romBankHigh1 as uint) << 8) | (mbc.romBankLow8 as uint);
+}
+
+func Mbc5Read(cart: *Cartridge, addr: uint16) -> uint8 {
+    if addr <= 0x3FFF {
+        return ReadRomBank(cart, 0, addr);
+    } else if addr <= 0x7FFF {
+        return ReadRomBank(cart, Mbc5RomBank(@cart.mbc), addr - 0x4000);
+    } else if addr >= 0xA000 && addr <= 0xBFFF {
+        if !cart.mbc.ramEnabled { return 0xFF; }
+        return ReadRamBank(cart, cart.mbc.ramBank as uint, addr - 0xA000);
+    }
+    return 0xFF;
+}
+
+/// 落とし穴: MBC1/MBC2/MBC3の「バンク0は1に読み替える」癖を持ち込まない。
+/// MBC5はバンク0をそのまま4000-7FFFに指定できる。
+func Mbc5Write(cart: *var Cartridge, addr: uint16, value: uint8) {
+    if addr <= 0x1FFF {
+        cart.mbc.ramEnabled = (value & 0x0F) == 0x0A;
+    } else if addr <= 0x2FFF {
+        cart.mbc.romBankLow8 = value;
+    } else if addr <= 0x3FFF {
+        cart.mbc.romBankHigh1 = value & 0x01;
+    } else if addr <= 0x5FFF {
+        cart.mbc.ramBank = value & 0x0F;
+    } else if addr >= 0xA000 && addr <= 0xBFFF {
+        if cart.mbc.ramEnabled {
+            WriteRamBank(cart, cart.mbc.ramBank as uint, addr - 0xA000, value);
+        }
+    }
+}
+
+// --- ディスパッチ ---
+
+/// ROM(0000-7FFF)・外部RAM(A000-BFFF)への読み出しをMBC種別に応じてディスパッチする。
+pub func MbcRead(cart: *Cartridge, addr: uint16) -> uint8 {
+    if cart.mbc.kind == MbcKind::RomOnly { return MbcNoneRead(cart, addr); }
+    else if cart.mbc.kind == MbcKind::Mbc1 { return Mbc1Read(cart, addr); }
+    else if cart.mbc.kind == MbcKind::Mbc2 { return Mbc2Read(cart, addr); }
+    else if cart.mbc.kind == MbcKind::Mbc3 { return Mbc3Read(cart, addr); }
+    return Mbc5Read(cart, addr);
+}
+
+/// ROM領域(バンク切替レジスタ)・外部RAMへの書き込みをMBC種別に応じてディスパッチする。
+pub func MbcWrite(cart: *var Cartridge, addr: uint16, value: uint8) {
+    if cart.mbc.kind == MbcKind::Mbc1 { Mbc1Write(cart, addr, value); }
+    else if cart.mbc.kind == MbcKind::Mbc2 { Mbc2Write(cart, addr, value); }
+    else if cart.mbc.kind == MbcKind::Mbc3 { Mbc3Write(cart, addr, value); }
+    else if cart.mbc.kind == MbcKind::Mbc5 { Mbc5Write(cart, addr, value); }
+    // ROM only: バンク切替レジスタも外部RAMも無いので書き込みは無視
+}

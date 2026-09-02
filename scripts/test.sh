@@ -27,6 +27,9 @@ echo "CpuInstrsTest: OK"
 echo "=== Running BlarggTest ==="
 (cd "$dir/Tests/Packages/Core/Blargg" && "$rux" run ${1:+"$1"})
 
+echo "=== Running MbcTest ==="
+(cd "$dir/Tests/Packages/Core/Mbc" && "$rux" run ${1:+"$1"})
+
 echo "=== Running MooneyeTest ==="
 (cd "$dir/Tests/Packages/Core/Mooneye" && "$rux" run ${1:+"$1"})
 

@@ -101,6 +101,29 @@ do
 	fetch_mooneye "acceptance/ppu/$name.gb" "$ROMS_DIR/mooneye/acceptance/ppu/$name.gb"
 done
 
+# emulator-only/mbc1,mbc2,mbc5: MBC系 ROM(フェーズ4)。MBC3(+RTC)はmooneyeスイート
+# に該当ROMが無いため、MbcTest内のユニットテストで検証する(docs/dev/phases/
+# phase-04-cartridge-mbc.md参照)。MBC1Mマルチカート(multicart_rom_8Mb)は
+# BubiBoy Lite同様スコープ外。
+mkdir -p "$ROMS_DIR/mooneye/emulator-only/mbc1" "$ROMS_DIR/mooneye/emulator-only/mbc2" \
+	"$ROMS_DIR/mooneye/emulator-only/mbc5"
+
+for name in bits_ramg bits_bank1 bits_bank2 bits_mode rom_512kb rom_1Mb rom_2Mb \
+	rom_4Mb rom_8Mb rom_16Mb ram_64kb ram_256kb
+do
+	fetch_mooneye "emulator-only/mbc1/$name.gb" "$ROMS_DIR/mooneye/emulator-only/mbc1/$name.gb"
+done
+
+for name in bits_ramg bits_romb bits_unused ram rom_512kb rom_1Mb rom_2Mb
+do
+	fetch_mooneye "emulator-only/mbc2/$name.gb" "$ROMS_DIR/mooneye/emulator-only/mbc2/$name.gb"
+done
+
+for name in rom_512kb rom_1Mb rom_2Mb rom_4Mb rom_8Mb rom_16Mb rom_32Mb rom_64Mb
+do
+	fetch_mooneye "emulator-only/mbc5/$name.gb" "$ROMS_DIR/mooneye/emulator-only/mbc5/$name.gb"
+done
+
 # dmg-acid2 (フェーズ3): mattcurrie/dmg-acid2 のリリース資産から直接取得する
 # (retrio/gb-test-roms や asoderman/Mooneye-Test-Suite-ROMS とはリポジトリが異なる)。
 ACID2_ROM_URL="https://github.com/mattcurrie/dmg-acid2/releases/download/v1.0/dmg-acid2.gb"

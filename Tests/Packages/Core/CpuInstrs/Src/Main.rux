@@ -18,9 +18,11 @@ func Main() -> int {
     // 0x0109: C5          PUSH BC
     // 0x010A: D1          POP DE
     // 0x010B: 28 04       JR Z, +4
-    var rom: uint8[512];
+    // カートリッジヘッダ解析(フェーズ4)により、ROMは実カートリッジの最小
+    // サイズ(32KiB)を要求するようになったため、バッファもそれに合わせる。
+    var rom: uint8[32768];
     var i: uint = 0;
-    while i < 512 {
+    while i < 32768 {
         rom[i] = 0x00; // NOP
         i += 1;
     }
@@ -60,7 +62,7 @@ func Main() -> int {
 
     CpuReset(@cpu, GbMode::Dmg);
     BusInit(@bus);
-    BusLoadRom(@bus, Slice<uint8> { data: @rom[0], length: 512 });
+    if !BusLoadRom(@bus, Slice<uint8> { data: @rom[0], length: 32768 }) { return 99; }
 
     // Test 1: LD A, d8 (0x3E)
     let cycles1 = CpuStep(@cpu, @bus);

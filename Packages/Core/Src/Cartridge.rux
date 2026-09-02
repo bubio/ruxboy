@@ -1,0 +1,186 @@
+/// カートリッジヘッダ解析(0x0134-0x014D)。
+/// ROM/RAM/MBC状態の実体は `Mbc.rux`(`Cartridge`/`Mbc`構造体)。
+
+import Core::Slice;
+
+pub const HeaderTypeAddr: uint = 0x0147;
+pub const HeaderRomSizeAddr: uint = 0x0148;
+pub const HeaderRamSizeAddr: uint = 0x0149;
+pub const HeaderCgbFlagAddr: uint = 0x0143;
+/// ヘッダ全体(タイトル〜チェックサム)を読める最小サイズ。
+pub const HeaderMinLen: uint = 0x0150;
+
+/// MBC2 は0x0149(RAMサイズコード)に関わらず常に内蔵512x4bit RAMを持つ(落とし穴)。
+pub const Mbc2InternalRamBytes: uint = 512;
+
+pub enum MbcKind {
+    RomOnly,
+    Mbc1,
+    Mbc2,
+    Mbc3,
+    Mbc5
+}
+
+pub enum CgbFlag {
+    DmgOnly,
+    CgbEnhanced,
+    CgbOnly
+}
+
+/// ヘッダ解析エラー。core は panic しない方針(BubiBoy Lite architecture.md踏襲)。
+pub enum CartridgeParseError {
+    None,
+    HeaderTooSmall,
+    UnsupportedType,       // 0x0147がROM only/MBC1/2/3/5以外(MBC6/7, HuC系, MMM01等)
+    UnsupportedRomSize,    // 0x0148が既知の範囲外
+    UnsupportedRamSize,    // 0x0149が既知の範囲外
+    RomSmallerThanHeader   // ファイルサイズがヘッダの申告するROMサイズより小さい
+}
+
+pub struct CartridgeInfo {
+    pub mbcKind: MbcKind;
+    pub romBanks: uint;
+    /// バイト数。MBC2は内蔵512バイト固定(0x0149に頼らず種別で判定)。
+    pub ramSize: uint;
+    pub hasBattery: bool;
+    pub hasRtc: bool;
+    pub cgbFlag: CgbFlag;
+    /// 0x0147の生値。未対応種別のエラー表示用。
+    pub typeCode: uint8;
+}
+
+/// 0x0147の値を分類する。hasRamは「ヘッダのRAMサイズコードに従って外部RAMを
+/// 持つか」で、MBC2の内蔵RAMは含まない(呼び出し側で種別により上書きする)。
+func ClassifyCartridgeType(code: uint8, kind: *var MbcKind, hasRamFlag: *var bool, hasBattery: *var bool, hasRtc: *var bool) -> bool {
+    if code == 0x00 {
+        *kind = MbcKind::RomOnly; *hasRamFlag = false; *hasBattery = false; *hasRtc = false;
+    } else if code == 0x01 {
+        *kind = MbcKind::Mbc1; *hasRamFlag = false; *hasBattery = false; *hasRtc = false;
+    } else if code == 0x02 {
+        *kind = MbcKind::Mbc1; *hasRamFlag = true; *hasBattery = false; *hasRtc = false;
+    } else if code == 0x03 {
+        *kind = MbcKind::Mbc1; *hasRamFlag = true; *hasBattery = true; *hasRtc = false;
+    } else if code == 0x05 {
+        *kind = MbcKind::Mbc2; *hasRamFlag = false; *hasBattery = false; *hasRtc = false;
+    } else if code == 0x06 {
+        *kind = MbcKind::Mbc2; *hasRamFlag = false; *hasBattery = true; *hasRtc = false;
+    } else if code == 0x0F { // MBC3+TIMER+BATTERY(RAM無し)
+        *kind = MbcKind::Mbc3; *hasRamFlag = false; *hasBattery = true; *hasRtc = true;
+    } else if code == 0x10 { // MBC3+TIMER+RAM+BATTERY
+        *kind = MbcKind::Mbc3; *hasRamFlag = true; *hasBattery = true; *hasRtc = true;
+    } else if code == 0x11 {
+        *kind = MbcKind::Mbc3; *hasRamFlag = false; *hasBattery = false; *hasRtc = false;
+    } else if code == 0x12 {
+        *kind = MbcKind::Mbc3; *hasRamFlag = true; *hasBattery = false; *hasRtc = false;
+    } else if code == 0x13 {
+        *kind = MbcKind::Mbc3; *hasRamFlag = true; *hasBattery = true; *hasRtc = false;
+    } else if code == 0x19 {
+        *kind = MbcKind::Mbc5; *hasRamFlag = false; *hasBattery = false; *hasRtc = false;
+    } else if code == 0x1A {
+        *kind = MbcKind::Mbc5; *hasRamFlag = true; *hasBattery = false; *hasRtc = false;
+    } else if code == 0x1B {
+        *kind = MbcKind::Mbc5; *hasRamFlag = true; *hasBattery = true; *hasRtc = false;
+    } else if code == 0x1C { // MBC5+RUMBLE(RAM無し。振動機能自体はスコープ外)
+        *kind = MbcKind::Mbc5; *hasRamFlag = false; *hasBattery = false; *hasRtc = false;
+    } else if code == 0x1D { // MBC5+RUMBLE+RAM
+        *kind = MbcKind::Mbc5; *hasRamFlag = true; *hasBattery = false; *hasRtc = false;
+    } else if code == 0x1E { // MBC5+RUMBLE+RAM+BATTERY
+        *kind = MbcKind::Mbc5; *hasRamFlag = true; *hasBattery = true; *hasRtc = false;
+    } else {
+        // MBC6/7, MMM01, HuC1/HuC3, ポケットカメラ等はスコープ外。
+        return false;
+    }
+    return true;
+}
+
+/// 0x0148を解釈する。ROMサイズ = 32KiB << code(コード0x00-0x08のみ既知)。
+func RomSizeFromCode(code: uint8, banks: *var uint, bytes: *var uint) -> bool {
+    if code > 0x08 {
+        return false;
+    }
+    let b = (2 as uint) << (code as uint); // 16KiBバンク数
+    *banks = b;
+    *bytes = b * 16 * 1024;
+    return true;
+}
+
+/// 0x0149を解釈する。コード0x01(未使用として予約)は既知の範囲外扱い。
+func RamSizeFromCode(code: uint8, bytes: *var uint) -> bool {
+    if code == 0x00 {
+        *bytes = 0; return true;
+    } else if code == 0x02 {
+        *bytes = 8 * 1024; return true;
+    } else if code == 0x03 {
+        *bytes = 32 * 1024; return true;
+    } else if code == 0x04 {
+        *bytes = 128 * 1024; return true;
+    } else if code == 0x05 {
+        *bytes = 64 * 1024; return true;
+    }
+    return false;
+}
+
+func ClassifyCgbFlag(code: uint8) -> CgbFlag {
+    if code == 0x80 { return CgbFlag::CgbEnhanced; }
+    else if code == 0xC0 { return CgbFlag::CgbOnly; }
+    return CgbFlag::DmgOnly;
+}
+
+/// ROM全体のバイト列からヘッダを解析する。romの所有権は呼び出し側に残る。
+/// 実際にロードして実行する経路(`CartridgeInit`)から呼ばれ、rom全体のサイズが
+/// ヘッダの申告するROMサイズ以上あるかまで検証する(RomSmallerThanHeader)。
+pub func CartridgeParseHeader(rom: Slice<uint8>, info: *var CartridgeInfo) -> CartridgeParseError {
+    info.mbcKind = MbcKind::RomOnly;
+    info.romBanks = 0;
+    info.ramSize = 0;
+    info.hasBattery = false;
+    info.hasRtc = false;
+    info.cgbFlag = CgbFlag::DmgOnly;
+    info.typeCode = 0;
+
+    if rom.length < HeaderMinLen {
+        return CartridgeParseError::HeaderTooSmall;
+    }
+
+    let typeCode = rom.data[HeaderTypeAddr];
+    info.typeCode = typeCode;
+
+    var kind: MbcKind = MbcKind::RomOnly;
+    var hasRamFlag = false;
+    var hasBattery = false;
+    var hasRtc = false;
+    if !ClassifyCartridgeType(typeCode, @kind, @hasRamFlag, @hasBattery, @hasRtc) {
+        return CartridgeParseError::UnsupportedType;
+    }
+    info.mbcKind = kind;
+    info.hasBattery = hasBattery;
+    info.hasRtc = hasRtc;
+
+    var romBanks: uint = 0;
+    var romBytes: uint = 0;
+    if !RomSizeFromCode(rom.data[HeaderRomSizeAddr], @romBanks, @romBytes) {
+        return CartridgeParseError::UnsupportedRomSize;
+    }
+    info.romBanks = romBanks;
+
+    var ramBytes: uint = 0;
+    if !RamSizeFromCode(rom.data[HeaderRamSizeAddr], @ramBytes) {
+        return CartridgeParseError::UnsupportedRamSize;
+    }
+
+    if kind == MbcKind::Mbc2 {
+        info.ramSize = Mbc2InternalRamBytes;
+    } else if hasRamFlag {
+        info.ramSize = ramBytes;
+    } else {
+        info.ramSize = 0;
+    }
+
+    info.cgbFlag = ClassifyCgbFlag(rom.data[HeaderCgbFlagAddr]);
+
+    if rom.length < romBytes {
+        return CartridgeParseError::RomSmallerThanHeader;
+    }
+
+    return CartridgeParseError::None;
+}

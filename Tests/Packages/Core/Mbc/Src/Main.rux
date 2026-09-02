@@ -1,0 +1,237 @@
+// MBC1/MBC2/MBC5: Mooneye emulator-only ROMを実行し、LD B,B ブレークポイント
+// (B=3,C=5,D=8,E=13,H=21,L=34 ならPASS)で判定する(MooneyeTestと同じ規約)。
+// MBC3(+RTC)はmooneyeスイートに該当ROMが無いため、Bus API 経由のユニットテスト
+// で検証する。
+
+import Core::Slice;
+import GbCore::{
+    Cpu, Bus, GbMode,
+    CpuReset, BusInit, BusPowerOn, BusLoadRom, BusRead, BusWrite, CpuStep,
+    MbcSyncWallClock
+};
+
+#Link("libSystem.B.dylib")
+extern {
+    func open(path: *char8, flags: int32, ...) -> int32;
+    func read(fd: int32, buf: *var opaque, count: uint) -> int64;
+    func close(fd: int32) -> int32;
+    func write(fd: int32, buf: *opaque, count: uint) -> int64;
+    func malloc(size: uint) -> *var opaque;
+    func free(ptr: *var opaque);
+}
+
+func Print(text: Slice<char8>) {
+    write(1, text.data as *opaque, text.length);
+}
+
+func PrintLine(text: Slice<char8>) {
+    Print(text);
+    Print("\n");
+}
+
+func OpenRom(path: Slice<char8>) -> int32 {
+    var fd = open(path.data, 0); // O_RDONLY
+    if fd >= 0 { return fd; }
+
+    var buf: char8[256];
+    let prefix: Slice<char8> = "../../../../";
+    var i: uint = 0;
+    while i < prefix.length {
+        buf[i] = prefix.data[i];
+        i += 1;
+    }
+    var j: uint = 0;
+    while j < path.length {
+        buf[i + j] = path.data[j];
+        j += 1;
+    }
+    buf[i + j] = c8'\0';
+    return open(@buf[0], 0);
+}
+
+/// romBuf(capacity バイトのヒープ確保領域)へROMを読み込んで実行する。
+func RunMbcRom(romBuf: *var uint8, capacity: uint, path: Slice<char8>, name: Slice<char8>) -> bool {
+    let fd = OpenRom(path);
+    if fd < 0 {
+        Print("ROM not found (skipped): ");
+        PrintLine(name);
+        return true;
+    }
+
+    let bytesRead = read(fd, romBuf as *var opaque, capacity);
+    close(fd);
+    if bytesRead <= 0 {
+        Print("Failed to read ROM: ");
+        PrintLine(name);
+        return false;
+    }
+
+    var cpu: Cpu;
+    var bus: Bus;
+    CpuReset(@cpu, GbMode::Dmg);
+    BusInit(@bus);
+    BusPowerOn(@bus);
+    if !BusLoadRom(@bus, Slice<uint8> { data: romBuf, length: bytesRead as uint }) {
+        Print("Failed to load ROM (header/MBC not supported): ");
+        PrintLine(name);
+        return false;
+    }
+    cpu.debugBreakOnLdBb = true;
+
+    let timeout: uint64 = 120000000;
+    while bus.cycles < timeout {
+        CpuStep(@cpu, @bus);
+        if cpu.ldBbHit {
+            if cpu.b == 3 && cpu.c == 5 && cpu.d == 8 && cpu.e == 13 && cpu.h == 21 && cpu.l == 34 {
+                Print("PASS: ");
+                PrintLine(name);
+                return true;
+            }
+            Print("FAIL: ");
+            PrintLine(name);
+            return false;
+        }
+    }
+
+    Print("TIMEOUT: ");
+    PrintLine(name);
+    return false;
+}
+
+/// MBC3(+RTC)のユニットテスト。mooneyeスイートに該当ROMが無いため、Bus API
+/// (BusInit/BusLoadRom/BusRead/BusWrite)と`MbcSyncWallClock`を直接叩いて検証する。
+func RunMbc3RtcTest() -> bool {
+    // 4バンク(64KiB)・32KiB RAM(4バンク)にして、MBC3固有のディスパッチ経路
+    // (ROMバンク切替の7bitマスク+0→1読み替え、RAMバンク選択が実際に別バンクへ
+    // 切り替わること)も検証する。
+    var rom: uint8[65536];
+    var i: uint = 0;
+    while i < 65536 { rom[i] = 0; i += 1; }
+    rom[0x0147] = 0x10; // MBC3+TIMER+RAM+BATTERY
+    rom[0x0148] = 0x01; // 64KiB(4バンク)
+    rom[0x0149] = 0x03; // 32KiB RAM(4バンク)
+    rom[0x0000] = 0x00; // bank0 マーカー
+    rom[0x4000] = 0x01; // bank1 マーカー
+    rom[0x8000] = 0x02; // bank2 マーカー
+    rom[0xC000] = 0x03; // bank3 マーカー
+
+    var bus: Bus;
+    BusInit(@bus);
+    if !BusLoadRom(@bus, Slice<uint8> { data: @rom[0], length: 65536 }) {
+        PrintLine("FAIL: mbc3_rtc (ROM load)");
+        return false;
+    }
+
+    // ROMバンク切替: 電源投入直後はバンク1、MBC1と同じく「0を書いても1に
+    // 読み替え」(MBC5と違い読み替えあり、落とし穴の回帰テスト)。
+    if BusRead(@bus, 0x4000) != 0x01 { PrintLine("FAIL: mbc3_rtc (initial rom bank)"); return false; }
+    BusWrite(@bus, 0x2000, 0x02);
+    if BusRead(@bus, 0x4000) != 0x02 { PrintLine("FAIL: mbc3_rtc (rom bank switch)"); return false; }
+    BusWrite(@bus, 0x2000, 0x00);
+    if BusRead(@bus, 0x4000) != 0x01 { PrintLine("FAIL: mbc3_rtc (rom bank 0->1 quirk)"); return false; }
+
+    BusWrite(@bus, 0x0000, 0x0A); // RAM/RTC有効化
+
+    // RAMバンク選択が実際に別バンクへ切り替わることの確認(共有ヘルパーの
+    // 経路だけでなく、MBC3のディスパッチが`ramOrRtcSelect`をバンク番号として
+    // 正しく渡していることを確認する)。
+    BusWrite(@bus, 0x4000, 0x00); // RAMバンク0
+    BusWrite(@bus, 0xA000, 0x33);
+    BusWrite(@bus, 0x4000, 0x01); // RAMバンク1
+    BusWrite(@bus, 0xA000, 0x5A);
+    BusWrite(@bus, 0x4000, 0x00);
+    if BusRead(@bus, 0xA000) != 0x33 { PrintLine("FAIL: mbc3_rtc (ram bank 0 isolation)"); return false; }
+    BusWrite(@bus, 0x4000, 0x01);
+    if BusRead(@bus, 0xA000) != 0x5A { PrintLine("FAIL: mbc3_rtc (ram bank 1 isolation)"); return false; }
+
+    // 未同期(rtcBaseUnix==0)の最初の呼び出しは基準点を打つだけ。
+    MbcSyncWallClock(@bus.cart, 1000);
+    BusWrite(@bus, 0x4000, 0x08); // 秒(S)選択
+    BusWrite(@bus, 0x6000, 0x00);
+    BusWrite(@bus, 0x6000, 0x01); // ラッチ
+    if BusRead(@bus, 0xA000) != 0 { PrintLine("FAIL: mbc3_rtc (initial sync should not advance)"); return false; }
+
+    // 5秒経過。
+    MbcSyncWallClock(@bus.cart, 1005);
+    BusWrite(@bus, 0x6000, 0x00);
+    BusWrite(@bus, 0x6000, 0x01);
+    if BusRead(@bus, 0xA000) != 5 { PrintLine("FAIL: mbc3_rtc (5s advance)"); return false; }
+
+    // DH(0x0C)のbit6を立てて停止。
+    BusWrite(@bus, 0x4000, 0x0C);
+    BusWrite(@bus, 0xA000, 0x40);
+    MbcSyncWallClock(@bus.cart, 2005); // 1000秒経過相当だが停止中は加算されない
+    BusWrite(@bus, 0x4000, 0x08);
+    BusWrite(@bus, 0x6000, 0x00);
+    BusWrite(@bus, 0x6000, 0x01);
+    if BusRead(@bus, 0xA000) != 5 { PrintLine("FAIL: mbc3_rtc (halted should not advance)"); return false; }
+
+    // 停止解除して512日を超えるぶん進め、桁あふれ(DH bit7)を確認する。
+    BusWrite(@bus, 0x4000, 0x0C);
+    BusWrite(@bus, 0xA000, 0x00); // halt解除
+    let farFuture: uint64 = 2005 + (513 as uint64) * 24 * 60 * 60;
+    MbcSyncWallClock(@bus.cart, farFuture);
+    BusWrite(@bus, 0x6000, 0x00);
+    BusWrite(@bus, 0x6000, 0x01);
+    BusWrite(@bus, 0x4000, 0x0C);
+    if (BusRead(@bus, 0xA000) & 0x80) == 0 { PrintLine("FAIL: mbc3_rtc (day rollover carry)"); return false; }
+
+    PrintLine("PASS: mbc3_rtc");
+    return true;
+}
+
+func Main() -> int {
+    PrintLine("=== Running MBC Tests ===");
+
+    var allPassed = true;
+
+    // mbc5/rom_64Mb(8MiB)が既知の最大ROMサイズ(header上限、rom size code 0x08)。
+    let capacity: uint = 8 * 1024 * 1024;
+    let buf = malloc(capacity);
+    if buf == null {
+        PrintLine("malloc failed");
+        return 1;
+    }
+    let romBuf = buf as *var uint8;
+
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/bits_ramg.gb\0", "mbc1/bits_ramg") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/bits_bank1.gb\0", "mbc1/bits_bank1") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/bits_bank2.gb\0", "mbc1/bits_bank2") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/bits_mode.gb\0", "mbc1/bits_mode") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/rom_512kb.gb\0", "mbc1/rom_512kb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/rom_1Mb.gb\0", "mbc1/rom_1Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/rom_2Mb.gb\0", "mbc1/rom_2Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/rom_4Mb.gb\0", "mbc1/rom_4Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/rom_8Mb.gb\0", "mbc1/rom_8Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/rom_16Mb.gb\0", "mbc1/rom_16Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/ram_64kb.gb\0", "mbc1/ram_64kb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc1/ram_256kb.gb\0", "mbc1/ram_256kb") { allPassed = false; }
+
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc2/bits_ramg.gb\0", "mbc2/bits_ramg") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc2/bits_romb.gb\0", "mbc2/bits_romb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc2/bits_unused.gb\0", "mbc2/bits_unused") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc2/ram.gb\0", "mbc2/ram") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc2/rom_512kb.gb\0", "mbc2/rom_512kb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc2/rom_1Mb.gb\0", "mbc2/rom_1Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc2/rom_2Mb.gb\0", "mbc2/rom_2Mb") { allPassed = false; }
+
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc5/rom_512kb.gb\0", "mbc5/rom_512kb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc5/rom_1Mb.gb\0", "mbc5/rom_1Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc5/rom_2Mb.gb\0", "mbc5/rom_2Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc5/rom_4Mb.gb\0", "mbc5/rom_4Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc5/rom_8Mb.gb\0", "mbc5/rom_8Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc5/rom_16Mb.gb\0", "mbc5/rom_16Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc5/rom_32Mb.gb\0", "mbc5/rom_32Mb") { allPassed = false; }
+    if !RunMbcRom(romBuf, capacity, "tests/roms/mooneye/emulator-only/mbc5/rom_64Mb.gb\0", "mbc5/rom_64Mb") { allPassed = false; }
+
+    free(buf);
+
+    if !RunMbc3RtcTest() { allPassed = false; }
+
+    if allPassed {
+        PrintLine("=== All MBC Tests Passed! ===");
+        return 0;
+    }
+    PrintLine("=== Some MBC Tests Failed! ===");
+    return 1;
+}

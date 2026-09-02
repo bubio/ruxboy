@@ -42,7 +42,7 @@ func Contains(slice: Slice<uint8>, target: Slice<char8>) -> bool {
     return false;
 }
 
-func RunBlarggRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool) -> bool {
+func RunBlarggRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool, timeoutTCycles: uint64) -> bool {
     var fd = open(path.data, 0); // O_RDONLY
     if fd < 0 {
         var buf: char8[256];
@@ -67,8 +67,8 @@ func RunBlarggRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool) ->
         return true; // ROM未取得時はスキップ扱い
     }
 
-    var romData: uint8[32768];
-    let bytesRead = read(fd, @romData[0] as *var opaque, 32768u);
+    var romData: uint8[65536]; // cpu_instrs.gb(統合版、MBC1、64KiB)まで許容
+    let bytesRead = read(fd, @romData[0] as *var opaque, 65536u);
     close(fd);
 
     if bytesRead <= 0 {
@@ -84,8 +84,7 @@ func RunBlarggRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool) ->
     BusPowerOn(@bus);
     BusLoadRom(@bus, Slice<uint8> { data: @romData[0], length: bytesRead as uint });
 
-    // タイムアウト: 120,000,000 T-cycle
-    let timeout: uint64 = 120000000;
+    let timeout = timeoutTCycles;
     var passed = false;
     var failed = false;
 
@@ -133,19 +132,26 @@ func Main() -> int {
     PrintLine("=== Running Blargg CPU Instruction Tests ===");
 
     var allPassed = true;
+    let timeout: uint64 = 120000000;
 
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/01-special.gb\0", "01-special", true) { allPassed = false; }
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/02-interrupts.gb\0", "02-interrupts", true) { allPassed = false; }
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/03-op sp,hl.gb\0", "03-op sp,hl", true) { allPassed = false; }
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/04-op r,imm.gb\0", "04-op r,imm", true) { allPassed = false; }
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/05-op rp.gb\0", "05-op rp", true) { allPassed = false; }
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/06-ld r,r.gb\0", "06-ld r,r", true) { allPassed = false; }
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/07-jr,jp,call,ret,rst.gb\0", "07-jr,jp,call,ret,rst", true) { allPassed = false; }
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/08-misc instrs.gb\0", "08-misc instrs", true) { allPassed = false; }
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/09-op r,r.gb\0", "09-op r,r", true) { allPassed = false; }
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/10-bit ops.gb\0", "10-bit ops", true) { allPassed = false; }
-    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/11-op a,(hl).gb\0", "11-op a,(hl)", true) { allPassed = false; }
-    if !RunBlarggRom("tests/roms/blargg/instr_timing/instr_timing.gb\0", "instr_timing", true) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/01-special.gb\0", "01-special", true, timeout) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/02-interrupts.gb\0", "02-interrupts", true, timeout) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/03-op sp,hl.gb\0", "03-op sp,hl", true, timeout) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/04-op r,imm.gb\0", "04-op r,imm", true, timeout) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/05-op rp.gb\0", "05-op rp", true, timeout) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/06-ld r,r.gb\0", "06-ld r,r", true, timeout) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/07-jr,jp,call,ret,rst.gb\0", "07-jr,jp,call,ret,rst", true, timeout) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/08-misc instrs.gb\0", "08-misc instrs", true, timeout) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/09-op r,r.gb\0", "09-op r,r", true, timeout) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/10-bit ops.gb\0", "10-bit ops", true, timeout) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/individual/11-op a,(hl).gb\0", "11-op a,(hl)", true, timeout) { allPassed = false; }
+    if !RunBlarggRom("tests/roms/blargg/instr_timing/instr_timing.gb\0", "instr_timing", true, timeout) { allPassed = false; }
+
+    // 統合版(MBC1が必要。フェーズ4でMBC1実装によりPASSに転じた)。11本の個別テスト
+    // を直列実行するぶん共通タイムアウトを超えるため、BubiBoy Lite実測値
+    // (224,317,844 T-cycle)にマージンを乗せた専用タイムアウトを使う。
+    let integratedTimeout: uint64 = 240000000;
+    if !RunBlarggRom("tests/roms/blargg/cpu_instrs/cpu_instrs.gb\0", "cpu_instrs (integrated, MBC1)", true, integratedTimeout) { allPassed = false; }
 
     if allPassed {
         PrintLine("=== All Phase 1 Blargg Tests Passed! ===");

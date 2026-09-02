@@ -13,16 +13,13 @@ pub const HramSize: uint = 127;
 /// I/O レジスタ領域のバイト数(FF00-FF7F)。
 pub const IoSize: uint = 128;
 
-/// Phase 1 で許容する ROM の最大サイズ(32KiB、ROM-onlyカートリッジ)。
-pub const RomCapacity: uint = 32768;
 /// シリアル出力ログの最大バイト数(Blargg 系テストROMの結果文字列用)。
 pub const SerialLogCapacity: uint = 16384;
 
 /// メモリマップ全体と周辺デバイス(Timer/PPU/OAM DMA/Serial)の状態。
 pub struct Bus {
     pub mode: GbMode;
-    pub rom: uint8[32768];
-    pub romLength: uint;
+    pub cart: Cartridge;
     pub vram: uint8[8192];
     pub wram: uint8[8192];
     pub oam: uint8[160];
@@ -61,7 +58,7 @@ pub struct Bus {
 /// `BusPowerOn` で別途セットする。
 pub func BusInit(bus: *var Bus) {
     bus.mode = GbMode::Dmg;
-    bus.romLength = 0;
+    CartridgeReset(@bus.cart);
     bus.ie = 0;
     bus.cycles = 0;
     bus.hwCycles = 0;
@@ -87,18 +84,12 @@ pub func BusInit(bus: *var Bus) {
     }
 }
 
-/// ROM データを ROM 領域へロードする。空データや `RomCapacity` 超過は失敗する。
+/// ROM データを解析し、カートリッジ(ヘッダ情報 + MBC 初期状態)をロードする。
+/// data は借用のまま `bus.cart.rom` に保持される(コピーしない)。ヘッダ不正・
+/// 未対応種別・サイズ不足は失敗する。
 pub func BusLoadRom(bus: *var Bus, data: Slice<uint8>) -> bool {
-    if data.length == 0 || data.length > RomCapacity {
-        return false;
-    }
-    var i: uint = 0;
-    while i < data.length {
-        bus.rom[i] = data.data[i];
-        i += 1;
-    }
-    bus.romLength = data.length;
-    return true;
+    let err = CartridgeInit(@bus.cart, data);
+    return err == CartridgeParseError::None;
 }
 
 /// ブート ROM 完了直後の IO レジスタ状態を直接セットする(実 BIOS ROM は読み
@@ -218,14 +209,11 @@ pub func BusRead(bus: *Bus, addr: uint16) -> uint8 {
 /// OAM DMA によるバス競合を受けない生の読み出し。メモリマップ全域を解決する。
 pub func BusReadRaw(bus: *Bus, addr: uint16) -> uint8 {
     if addr <= 0x7FFF {
-        if (addr as uint) < bus.romLength {
-            return bus.rom[addr as uint];
-        }
-        return 0xFF;
+        return MbcRead(@bus.cart, addr);
     } else if addr <= 0x9FFF {
         return bus.vram[(addr - 0x8000) as uint];
     } else if addr <= 0xBFFF {
-        return 0xFF; // Phase 1: 外部RAM未実装
+        return MbcRead(@bus.cart, addr);
     } else if addr <= 0xDFFF {
         return bus.wram[(addr - 0xC000) as uint];
     } else if addr <= 0xFDFF {
@@ -250,11 +238,11 @@ pub func BusWrite(bus: *var Bus, addr: uint16, value: uint8) {
         return;
     }
     if addr <= 0x7FFF {
-        // ROM: 書き込み無視 (Phase 1)
+        MbcWrite(@bus.cart, addr, value); // ROM領域: MBCのバンク切替レジスタ
     } else if addr <= 0x9FFF {
         bus.vram[(addr - 0x8000) as uint] = value;
     } else if addr <= 0xBFFF {
-        // 外部RAM未実装
+        MbcWrite(@bus.cart, addr, value);
     } else if addr <= 0xDFFF {
         bus.wram[(addr - 0xC000) as uint] = value;
     } else if addr <= 0xFDFF {

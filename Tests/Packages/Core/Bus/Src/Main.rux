@@ -48,9 +48,15 @@ func Main() -> int {
     if log.length != 1 { return 11; }
     if log.data[0] != 0x48 { return 12; }
 
-    // Test 8: ROM loading
-    var romData: uint8[4] = [0x00, 0xC3, 0x50, 0x01];
-    let loaded = BusLoadRom(@bus, Slice<uint8> { data: @romData[0], length: 4 });
+    // Test 8: ROM loading (ROM-only, 32KiB、実カートリッジの最小サイズ)
+    var romData: uint8[32768];
+    var ri: uint = 0;
+    while ri < 32768 { romData[ri] = 0; ri += 1; }
+    romData[1] = 0xC3;
+    romData[0x0147] = 0x00; // ROM only
+    romData[0x0148] = 0x00; // 32KiB (2 banks)
+    romData[0x0149] = 0x00; // RAMなし
+    let loaded = BusLoadRom(@bus, Slice<uint8> { data: @romData[0], length: 32768 });
     if !loaded { return 13; }
     if BusRead(@bus, 0x0001) != 0xC3 { return 14; }
 
@@ -106,6 +112,96 @@ func Main() -> int {
     BusTick(@bus, 4);
     BusWrite(@bus, 0xFF06, 0x66);
     if BusRead(@bus, 0xFF05) != 0x66 { return 26; }
+
+    // 共有ROMバッファ(最大128KiB=MBC5テストが必要とする8バンク)。
+    // 各テストの先頭で使う範囲だけゼロ化・スタンプし直す。
+    var mbcRom: uint8[131072];
+    var mi: uint = 0;
+    while mi < 131072 { mbcRom[mi] = 0; mi += 1; }
+
+    // Test 14: MBC1 バンク切替・RAM有効化・「5bit=0は1に読み替え」の落とし穴
+    // type=0x02(MBC1+RAM), romSize=0x01(4バンク=64KiB), ramSize=0x02(8KiB)
+    mbcRom[0x0147] = 0x02;
+    mbcRom[0x0148] = 0x01;
+    mbcRom[0x0149] = 0x02;
+    mbcRom[0x0000] = 0x00; // bank0 マーカー
+    mbcRom[0x4000] = 0x01; // bank1 マーカー
+    mbcRom[0x8000] = 0x02; // bank2 マーカー
+    mbcRom[0xC000] = 0x03; // bank3 マーカー
+    BusInit(@bus);
+    if !BusLoadRom(@bus, Slice<uint8> { data: @mbcRom[0], length: 65536 }) { return 27; }
+    if BusRead(@bus, 0x0000) != 0x00 { return 28; }
+    if BusRead(@bus, 0x4000) != 0x01 { return 29; } // 電源投入直後はバンク1
+    BusWrite(@bus, 0x2000, 0x03);
+    if BusRead(@bus, 0x4000) != 0x03 { return 30; }
+    BusWrite(@bus, 0x2000, 0x00); // 落とし穴: 0を書いても1に読み替えられる
+    if BusRead(@bus, 0x4000) != 0x01 { return 31; }
+    if BusRead(@bus, 0xA000) != 0xFF { return 32; } // RAM無効時は0xFF
+    BusWrite(@bus, 0x0000, 0x0A); // RAM有効化
+    BusWrite(@bus, 0xA000, 0x77);
+    if BusRead(@bus, 0xA000) != 0x77 { return 33; }
+    BusWrite(@bus, 0x0000, 0x00); // RAM無効化
+    if BusRead(@bus, 0xA000) != 0xFF { return 34; }
+
+    // Test 15: MBC2 内蔵512バイトRAM(アドレスbit8での区別、エコー、上位nibble=1)
+    // type=0x06(MBC2+BATTERY), romSize=0x00(2バンク=32KiB)
+    mi = 0;
+    while mi < 32768 { mbcRom[mi] = 0; mi += 1; }
+    mbcRom[0x0147] = 0x06;
+    mbcRom[0x0148] = 0x00;
+    mbcRom[0x0149] = 0x00;
+    mbcRom[0x0000] = 0x00; // bank0 マーカー
+    mbcRom[0x4000] = 0x01; // bank1 マーカー
+    BusInit(@bus);
+    if !BusLoadRom(@bus, Slice<uint8> { data: @mbcRom[0], length: 32768 }) { return 35; }
+    if BusRead(@bus, 0x4000) != 0x01 { return 36; } // 電源投入直後はバンク1
+    if BusRead(@bus, 0xA000) != 0xFF { return 37; } // RAM無効時は0xFF
+    BusWrite(@bus, 0x0000, 0x0A); // bit8=0: RAM有効化
+    BusWrite(@bus, 0xA000, 0xF7);
+    if BusRead(@bus, 0xA000) != 0xF7 { return 38; } // 上位nibbleは読むと1、下位4bitのみ実データ
+    if BusRead(@bus, 0xA200) != 0xF7 { return 39; } // 0x200バイト境界でエコー
+
+    // Test 16: MBC3 RAM/RTC選択とラッチ(latchedRtcを経由してのみCPUから見える)
+    // type=0x10(MBC3+TIMER+RAM+BATTERY), romSize=0x00(2バンク=32KiB), ramSize=0x02(8KiB)
+    mbcRom[0x0147] = 0x10;
+    mbcRom[0x0148] = 0x00;
+    mbcRom[0x0149] = 0x02;
+    BusInit(@bus);
+    if !BusLoadRom(@bus, Slice<uint8> { data: @mbcRom[0], length: 32768 }) { return 40; }
+    BusWrite(@bus, 0x0000, 0x0A); // RAM/RTC有効化
+    BusWrite(@bus, 0x4000, 0x00); // RAMバンク0選択
+    BusWrite(@bus, 0xA000, 0x33);
+    if BusRead(@bus, 0xA000) != 0x33 { return 41; }
+    BusWrite(@bus, 0x4000, 0x08); // RTC秒(S)選択
+    BusWrite(@bus, 0xA000, 45);   // ライブレジスタへ直接書き込み(正規化: %60)
+    if BusRead(@bus, 0xA000) != 0x00 { return 42; } // 未ラッチなのでlatchedRtc(初期値0)のまま
+    BusWrite(@bus, 0x6000, 0x00); // ラッチ準備
+    BusWrite(@bus, 0x6000, 0x01); // ラッチ実行
+    if BusRead(@bus, 0xA000) != 45 { return 43; }
+
+    // Test 17: MBC5(バンク0の「1への読み替え」を行わない、8バンク=128KiB)
+    // type=0x1B(MBC5+RAM+BATTERY), romSize=0x02(8バンク), ramSize=0x02(8KiB)
+    mi = 0;
+    while mi < 131072 { mbcRom[mi] = 0; mi += 1; }
+    mbcRom[0x0147] = 0x1B;
+    mbcRom[0x0148] = 0x02;
+    mbcRom[0x0149] = 0x02;
+    var bankIndex: uint = 0;
+    while bankIndex < 8 {
+        mbcRom[bankIndex * 0x4000] = bankIndex as uint8;
+        bankIndex += 1;
+    }
+    BusInit(@bus);
+    if !BusLoadRom(@bus, Slice<uint8> { data: @mbcRom[0], length: 131072 }) { return 44; }
+    if BusRead(@bus, 0x4000) != 0x01 { return 45; } // 電源投入直後はバンク1
+    BusWrite(@bus, 0x2000, 0x00); // 落とし穴: MBC5は0をそのまま指定できる(1に読み替えない)
+    if BusRead(@bus, 0x4000) != 0x00 { return 46; }
+    BusWrite(@bus, 0x2000, 0x05);
+    if BusRead(@bus, 0x4000) != 0x05 { return 47; }
+    BusWrite(@bus, 0x0000, 0x0A); // RAM有効化
+    BusWrite(@bus, 0x4000, 0x00); // RAMバンク0選択
+    BusWrite(@bus, 0xA000, 0x21);
+    if BusRead(@bus, 0xA000) != 0x21 { return 48; }
 
     return 0;
 }
