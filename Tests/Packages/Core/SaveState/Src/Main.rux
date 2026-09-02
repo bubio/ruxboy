@@ -1,0 +1,279 @@
+// セーブステート(SaveState.rux)のラウンドトリップテスト(T7-1/T7-2)。
+//
+// 単純な write→read→write→バイト比較は「両側が同じフィールドを忘れていれば
+// 一致してしまう」ため何も検証しない。ここでは「復元後に実行を再開したら
+// 元のまま実行を続けた場合と同じ状態に収束するか」という分岐テストで検証する:
+//
+//   1. cpu_instrs.gb(MBC1)をロードし、チェックポイントまで実行する。
+//   2. その時点でセーブステートを作る。
+//   3. 元のcpu/busをさらにNサイクル実行してからセーブステートを再取得(H1)。
+//   4. 別の新規cpu/bus(同じROMをロードしただけの初期状態)へステップ2のセーブ
+//      ステートを復元し、同じNサイクル実行してからセーブステートを再取得(H2)。
+//   5. H1とH2が一致することを確認する。
+//
+// 復元先を新規インスタンスにするのが要点: 同一インスタンスへ復元すると、
+// 保存し忘れたフィールドもロード前の正しい値のまま残ってしまい検出できない。
+// 新規インスタンスならロード前は初期値(0等)なので、保存漏れがあれば実行が
+// 分岐し、H1とH2が食い違う。
+
+import Core::{ Slice, MutableSlice };
+import GbCore::{
+    Cpu, Bus, GbMode, CyclesPerFrame,
+    CpuReset, BusInit, BusPowerOn, BusLoadRom, BusWrite, CpuStep,
+    SaveStateError, SaveStateWrite, SaveStateRead, SaveStateExpectedSize
+};
+
+#Link("libSystem.B.dylib")
+extern {
+    func open(path: *char8, flags: int32, ...) -> int32;
+    func read(fd: int32, buf: *var opaque, count: uint) -> int64;
+    func close(fd: int32) -> int32;
+    func write(fd: int32, buf: *opaque, count: uint) -> int64;
+}
+
+func Print(text: Slice<char8>) {
+    write(1, text.data as *opaque, text.length);
+}
+
+func PrintLine(text: Slice<char8>) {
+    Print(text);
+    Print("\n");
+}
+
+func PrintHex64(value: uint64) {
+    let digits: Slice<char8> = "0123456789ABCDEF";
+    var buf: char8[16];
+    var i: int = 15;
+    var v = value;
+    while i >= 0 {
+        buf[i as uint] = digits.data[(v & 0xF) as uint];
+        v = v >> 4;
+        i -= 1;
+    }
+    write(1, @buf[0] as *opaque, 16);
+}
+
+func OpenRom(path: Slice<char8>) -> int32 {
+    var fd = open(path.data, 0); // O_RDONLY
+    if fd >= 0 { return fd; }
+
+    var buf: char8[256];
+    let prefix: Slice<char8> = "../../../../";
+    var i: uint = 0;
+    while i < prefix.length {
+        buf[i] = prefix.data[i];
+        i += 1;
+    }
+    var j: uint = 0;
+    while j < path.length {
+        buf[i + j] = path.data[j];
+        j += 1;
+    }
+    buf[i + j] = c8'\0';
+    return open(@buf[0], 0);
+}
+
+const FnvOffsetBasis: uint64 = 0xcbf29ce484222325u64;
+const FnvPrime: uint64 = 0x100000001b3u64;
+
+func FnvByte(hash: uint64, b: uint8) -> uint64 {
+    return (hash ^ (b as uint64)) * FnvPrime;
+}
+
+func HashBytes(data: *uint8, len: uint) -> uint64 {
+    var hash: uint64 = FnvOffsetBasis;
+    var i: uint = 0;
+    while i < len {
+        hash = FnvByte(hash, data[i]);
+        i += 1;
+    }
+    return hash;
+}
+
+// SaveStateWriteの出力バイト列そのものをハッシュ化して「その時点のcpu/busの
+// 保存対象状態」を1つの値に集約する。復元後に実行を再開して発散したかどうかは、
+// 同じNサイクル実行後にもう一度この関数を呼んで比較すればよい。
+func SnapshotHash(cpu: *Cpu, bus: *Bus, scratch: MutableSlice<uint8>) -> uint64 {
+    let n = SaveStateWrite(cpu, bus, scratch);
+    return HashBytes(scratch.data, n);
+}
+
+const ScratchCapacity: uint = 300000;
+
+func Main() -> int {
+    let romPath: Slice<char8> = "tests/roms/blargg/cpu_instrs/cpu_instrs.gb\0";
+    let fd = OpenRom(romPath);
+    if fd < 0 {
+        Print("ROM not found (skipped): ");
+        PrintLine(romPath);
+        return 0;
+    }
+
+    var romData: uint8[65536];
+    let bytesRead = read(fd, @romData[0] as *var opaque, 65536u);
+    close(fd);
+    if bytesRead <= 0 {
+        Print("Failed to read ROM: ");
+        PrintLine(romPath);
+        return 1;
+    }
+    let rom = Slice<uint8> { data: @romData[0], length: bytesRead as uint };
+
+    var scratchBuf: uint8[300000];
+    let scratch = MutableSlice<uint8> { data: @scratchBuf[0], length: ScratchCapacity };
+
+    // --- チェックポイントまで実行(元インスタンス) ---
+    var cpu: Cpu;
+    var bus: Bus;
+    BusInit(@bus);
+    BusPowerOn(@bus);
+    if !BusLoadRom(@bus, rom) {
+        PrintLine("Failed to load ROM");
+        return 1;
+    }
+    CpuReset(@cpu, bus.mode);
+
+    let checkpointCycles: uint64 = CyclesPerFrame * 40u64;
+    while bus.cycles < checkpointCycles {
+        CpuStep(@cpu, @bus);
+    }
+
+    // APU(パルス/波形/ノイズch)にも意味のある内部状態を作っておく
+    // (cpu_instrsは音を鳴らさないため、素の実行だけではAPU状態がほぼ初期値のまま)。
+    BusWrite(@bus, 0xFF24, 0x77); // NR50: 両chフルボリューム
+    BusWrite(@bus, 0xFF25, 0xFF); // NR51: 全chを両スピーカーへ
+    BusWrite(@bus, 0xFF26, 0x80); // NR52: APU電源on
+    BusWrite(@bus, 0xFF10, 0x11); // NR10: スイープ有効
+    BusWrite(@bus, 0xFF12, 0xF3); // NR12: エンベロープ
+    BusWrite(@bus, 0xFF13, 0x9A);
+    BusWrite(@bus, 0xFF14, 0xC7); // NR14: トリガー + 長さ有効
+    BusWrite(@bus, 0xFF1A, 0x80); // NR30: 波形DAC有効
+    BusWrite(@bus, 0xFF1B, 0x40);
+    BusWrite(@bus, 0xFF1C, 0x20); // NR32: 出力レベル50%
+    BusWrite(@bus, 0xFF1E, 0xC0); // NR34: トリガー
+    BusWrite(@bus, 0xFF20, 0x08); // NR41: 長さ
+    BusWrite(@bus, 0xFF22, 0x76); // NR43
+    BusWrite(@bus, 0xFF23, 0xC0); // NR44: トリガー + 長さ有効
+
+    // --- チェックポイントを保存 ---
+    let saveSize = SaveStateWrite(@cpu, @bus, scratch);
+    var saveBuf: uint8[300000];
+    var i: uint = 0;
+    while i < saveSize {
+        saveBuf[i] = scratchBuf[i];
+        i += 1;
+    }
+    let saveData = Slice<uint8> { data: @saveBuf[0], length: saveSize };
+    let expected = SaveStateExpectedSize(@bus);
+    if saveSize != expected {
+        Print("FAIL: saveSize != SaveStateExpectedSize got=");
+        PrintHex64(saveSize as uint64);
+        Print(" expected=");
+        PrintHex64(expected as uint64);
+        PrintLine("");
+        return 1;
+    }
+
+    // --- 元インスタンス: さらに実行してH1を取る ---
+    let runCycles: uint64 = CyclesPerFrame * 10u64;
+    let targetCyclesOrig = bus.cycles + runCycles;
+    while bus.cycles < targetCyclesOrig {
+        CpuStep(@cpu, @bus);
+    }
+    let h1 = SnapshotHash(@cpu, @bus, scratch);
+
+    // --- 新規インスタンスへ復元し、同じだけ実行してH2を取る ---
+    var cpu2: Cpu;
+    var bus2: Bus;
+    BusInit(@bus2);
+    BusPowerOn(@bus2);
+    if !BusLoadRom(@bus2, rom) {
+        PrintLine("Failed to load ROM (second instance)");
+        return 1;
+    }
+    CpuReset(@cpu2, bus2.mode);
+
+    // T20-6相当: 復元前にリングバッファのインデックスをわざと汚しておき、
+    // SaveStateReadが明示的にクリアすることを検証する。
+    bus2.apu.ringRead = 123;
+    bus2.apu.ringWrite = 456;
+    bus2.apu.ringCount = 789;
+
+    let readErr = SaveStateRead(@cpu2, @bus2, saveData);
+    if readErr != SaveStateError::None {
+        PrintLine("FAIL: SaveStateRead on valid data returned an error");
+        return 1;
+    }
+    if bus2.apu.ringRead != 0 || bus2.apu.ringWrite != 0 || bus2.apu.ringCount != 0 {
+        PrintLine("FAIL: SaveStateRead did not clear APU ring buffer indices");
+        return 1;
+    }
+
+    let targetCyclesRestored = bus2.cycles + runCycles;
+    while bus2.cycles < targetCyclesRestored {
+        CpuStep(@cpu2, @bus2);
+    }
+    let h2 = SnapshotHash(@cpu2, @bus2, scratch);
+
+    if h1 != h2 {
+        Print("FAIL: divergence after restore, h1=0x");
+        PrintHex64(h1);
+        Print(" h2=0x");
+        PrintHex64(h2);
+        PrintLine("");
+        return 2;
+    }
+    PrintLine("PASS: restore-then-run converges to the same state as continuing unrestored");
+
+    // --- エラーパス: 不正入力はcpu2/bus2の状態を一切変えない ---
+    let unchangedHashBefore = SnapshotHash(@cpu2, @bus2, scratch);
+
+    var tooSmall: uint8[4];
+    var k: uint = 0;
+    while k < 4 { tooSmall[k] = saveBuf[k]; k += 1; }
+    if SaveStateRead(@cpu2, @bus2, Slice<uint8> { data: @tooSmall[0], length: 4 }) != SaveStateError::TooSmall {
+        PrintLine("FAIL: expected TooSmall for a too-short buffer");
+        return 3;
+    }
+
+    var badMagic: uint8[300000];
+    var m: uint = 0;
+    while m < saveSize { badMagic[m] = saveBuf[m]; m += 1; }
+    badMagic[0] = badMagic[0] ^ 0xFF;
+    if SaveStateRead(@cpu2, @bus2, Slice<uint8> { data: @badMagic[0], length: saveSize }) != SaveStateError::BadMagic {
+        PrintLine("FAIL: expected BadMagic");
+        return 3;
+    }
+
+    var badVersion: uint8[300000];
+    var n: uint = 0;
+    while n < saveSize { badVersion[n] = saveBuf[n]; n += 1; }
+    badVersion[4] = badVersion[4] ^ 0xFF;
+    if SaveStateRead(@cpu2, @bus2, Slice<uint8> { data: @badVersion[0], length: saveSize }) != SaveStateError::VersionMismatch {
+        PrintLine("FAIL: expected VersionMismatch");
+        return 3;
+    }
+
+    var badChecksum: uint8[300000];
+    var p: uint = 0;
+    while p < saveSize { badChecksum[p] = saveBuf[p]; p += 1; }
+    badChecksum[8] = badChecksum[8] ^ 0xFF;
+    if SaveStateRead(@cpu2, @bus2, Slice<uint8> { data: @badChecksum[0], length: saveSize }) != SaveStateError::RomChecksumMismatch {
+        PrintLine("FAIL: expected RomChecksumMismatch");
+        return 3;
+    }
+
+    if SaveStateRead(@cpu2, @bus2, Slice<uint8> { data: @saveBuf[0], length: saveSize - 1 }) != SaveStateError::TooSmall {
+        PrintLine("FAIL: expected TooSmall for a body one byte short");
+        return 3;
+    }
+
+    let unchangedHashAfter = SnapshotHash(@cpu2, @bus2, scratch);
+    if unchangedHashBefore != unchangedHashAfter {
+        PrintLine("FAIL: a failed SaveStateRead mutated cpu2/bus2");
+        return 4;
+    }
+    PrintLine("PASS: all SaveStateRead error paths leave state unchanged");
+
+    return 0;
+}

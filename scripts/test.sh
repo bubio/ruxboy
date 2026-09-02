@@ -47,4 +47,8 @@ echo "CgbTest: OK"
 echo "=== Running Acid2Test ==="
 (cd "$dir/Tests/Packages/Core/Acid2" && "$rux" run ${1:+"$1"})
 
+echo "=== Running SaveStateTest ==="
+(cd "$dir/Tests/Packages/Core/SaveState" && "$rux" run ${1:+"$1"})
+echo "SaveStateTest: OK"
+
 echo "=== All Tests Passed! ==="

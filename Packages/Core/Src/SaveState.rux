@@ -1,0 +1,665 @@
+/// ステートのシリアライズ/復元(T7-1/T7-2)。移植元:
+/// `~/dev/_Emu/BubiBoyLite/src/core/savestate.odin`。
+///
+/// フォーマット: マジック"RXBS"(4B) + フォーマットバージョンu32(=1) + ROMヘッダの
+/// グローバルチェックサム(0x014E-0x014F、2B) + 本体。すべてリトルエンディアン。
+///
+/// 本体には ROM 自体を含めない(チェックサムで同一カートリッジであることを確認する
+/// のみ)。シリアル出力キャプチャ(bus.serialLog/serialLogLength、テスト専用)・
+/// Mooneye判定用デバッグフラグ(cpu.debugBreakOnLdBb/ldBbHit)・APUのリングバッファ
+/// (apu.ringLeft/ringRight/ringRead/ringWrite/ringCount、単なる出力先バッファで
+/// ゲーム状態ではない)・PPUのスキャンライン描画スクラッチ(ppu.bgColorIndex/
+/// bgCgbPalette/bgCgbPriority、`PpuRenderScanline`内で書いてすぐ読むだけで1ライン
+/// をまたいで生存しない)は保存しない。ジョイパッド(FF00)はBus.ioに生値のまま
+/// 収まっているため専用フィールドは不要(RuxBoyには現時点でJoypad.rux相当が無い。
+/// フェーズ8で入力状態を追加する場合はフォーマットバージョンを上げること)。
+///
+/// 設計: BubiBoy Lite の Odin 版は Mbc状態をtagged unionで持つため種別ごとに本体
+/// サイズが変わったが、RuxBoy の`Mbc`は種別を問わず全フィールドを持つフラット
+/// 構造体(Mbc.rux参照)なので、その部分は固定サイズになる。可変長要素は外部RAM
+/// (`cart.ram`、実際に使う長さは`cart.ramLength`)だけ。`SaveStateExpectedSize`が
+/// 「現在ロードされているカートリッジの外部RAMサイズ」から本体サイズを計算し、
+/// `SaveStateWrite`はこのサイズちょうどのバッファへ、`SaveStateRead`はdecode前に
+/// `data.length`がこのサイズ以上であることを確認する。これにより「読み込み中に
+/// 範囲外アクセスが起きる」ことを構造的に防ぎ、「現在の状態を壊さない」
+/// (全フィールド読み取り成功が保証されてから初めてcpu/busへ書き込む)を単純な
+/// 事前サイズ検査だけで満たす。
+
+import Core::{ Assert, MutableSlice, Slice };
+
+pub const SaveStateMagic0: uint8 = 0x52; // 'R'
+pub const SaveStateMagic1: uint8 = 0x58; // 'X'
+pub const SaveStateMagic2: uint8 = 0x42; // 'B'
+pub const SaveStateMagic3: uint8 = 0x53; // 'S'
+pub const SaveStateFormatVersion: uint32 = 1;
+pub const SaveStateHeaderSize: uint = 4 + 4 + 2; // マジック + バージョン + ROMチェックサム
+
+pub enum SaveStateError {
+    None,
+    BadMagic,
+    VersionMismatch,
+    RomChecksumMismatch,
+    TooSmall
+}
+
+// --- カーソル(書き込み/読み出し共通の位置管理) ---
+// 事前にバッファサイズを確定させてから使うため、範囲外アクセスは起きない前提
+// (上記コメント参照)。
+
+struct WriteCursor {
+    dst: MutableSlice<uint8>;
+    pos: uint;
+}
+
+struct ReadCursor {
+    src: Slice<uint8>;
+    pos: uint;
+}
+
+func PutU8(c: *var WriteCursor, v: uint8) {
+    c.dst.data[c.pos] = v;
+    c.pos += 1;
+}
+
+func GetU8(c: *var ReadCursor) -> uint8 {
+    let v = c.src.data[c.pos];
+    c.pos += 1;
+    return v;
+}
+
+func PutBool(c: *var WriteCursor, v: bool) {
+    PutU8(c, v ? 1u8 : 0u8);
+}
+
+func GetBool(c: *var ReadCursor) -> bool {
+    return GetU8(c) != 0;
+}
+
+func PutU16(c: *var WriteCursor, v: uint16) {
+    PutU8(c, v as uint8);
+    PutU8(c, (v >> 8) as uint8);
+}
+
+func GetU16(c: *var ReadCursor) -> uint16 {
+    let lo = GetU8(c) as uint16;
+    let hi = GetU8(c) as uint16;
+    return lo | (hi << 8);
+}
+
+func PutU32(c: *var WriteCursor, v: uint32) {
+    PutU8(c, v as uint8);
+    PutU8(c, (v >> 8) as uint8);
+    PutU8(c, (v >> 16) as uint8);
+    PutU8(c, (v >> 24) as uint8);
+}
+
+func GetU32(c: *var ReadCursor) -> uint32 {
+    let b0 = GetU8(c) as uint32;
+    let b1 = GetU8(c) as uint32;
+    let b2 = GetU8(c) as uint32;
+    let b3 = GetU8(c) as uint32;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+func PutU64(c: *var WriteCursor, v: uint64) {
+    PutU32(c, v as uint32);
+    PutU32(c, (v >> 32) as uint32);
+}
+
+func GetU64(c: *var ReadCursor) -> uint64 {
+    let lo = GetU32(c) as uint64;
+    let hi = GetU32(c) as uint64;
+    return lo | (hi << 32);
+}
+
+// int(ネイティブ幅)フィールドはフォーマット上は常に符号付き32bit固定で保存する
+// (バイト順規約に加え、フォーマットをホストのポインタ幅に依存させないため)。
+// dot/imeDelay等、実際に扱う値は十分32bitに収まる。
+func PutIntAsI32(c: *var WriteCursor, v: int) {
+    PutU32(c, v as uint32);
+}
+
+func GetIntAsI32(c: *var ReadCursor) -> int {
+    return GetU32(c) as int;
+}
+
+func PutI32(c: *var WriteCursor, v: int32) {
+    PutU32(c, v as uint32);
+}
+
+func GetI32(c: *var ReadCursor) -> int32 {
+    return GetU32(c) as int32;
+}
+
+func PutBytes(c: *var WriteCursor, src: *uint8, len: uint) {
+    var i: uint = 0;
+    while i < len {
+        c.dst.data[c.pos + i] = src[i];
+        i += 1;
+    }
+    c.pos += len;
+}
+
+func GetBytes(c: *var ReadCursor, dst: *var uint8, len: uint) {
+    var i: uint = 0;
+    while i < len {
+        dst[i] = c.src.data[c.pos + i];
+        i += 1;
+    }
+    c.pos += len;
+}
+
+// --- サイズ計算 ---
+
+const CpuStateSize: uint = 8 /*a,f,b,c,d,e,h,l*/ + 2 /*sp*/ + 2 /*pc*/ + 1 /*ime*/ + 1 /*halted*/ + 1 /*haltBug*/ + 4 /*imeDelay*/ + 1 /*stopped*/ + 1 /*illegalOpcodeHit*/;
+
+const TimerStateSize: uint = 2 /*divCounter*/ + 1 /*tima*/ + 1 /*tma*/ + 1 /*tac*/ + 4 /*timerReloadPending*/ + 1 /*timerReloadJustHappened*/;
+
+const PpuStateSize: uint = 11 /*lcdc,statEnable,scy,scx,ly,lyc,bgp,obp0,obp1,wy,wx*/ + 1 /*mode*/ + 1 /*lycEqual*/ + 4 /*dot*/ + 4 /*windowLine*/ + 1 /*statIrqLine*/ + (23040 * 4) /*framebuffer*/;
+
+const HdmaStateSize: uint = 2 /*hdmaSource*/ + 2 /*hdmaDestination*/ + 4 /*hdmaRemaining*/ + 1 /*hdmaActive*/ + 1 /*hdmaAborted*/ + 4 /*hdmaAbortedRemaining*/;
+
+const EnvelopeSize: uint = 4 /*initialVolume*/ + 1 /*increase*/ + 4 /*period*/ + 4 /*timer*/ + 4 /*volume*/;
+const SweepSize: uint = 4 /*period*/ + 1 /*negate*/ + 4 /*shift*/ + 4 /*timer*/ + 4 /*shadowFrequency*/ + 1 /*enabled*/ + 1 /*negateCalculatedSinceTrigger*/;
+const PulseChannelSize: uint = 1 /*enabled*/ + 1 /*dacEnabled*/ + 1 /*duty*/ + 1 /*dutyStep*/ + 4 /*lengthCounter*/ + 1 /*lengthEnabled*/ + 4 /*frequency*/ + 4 /*timer*/ + EnvelopeSize + SweepSize;
+const WaveChannelSize: uint = 1 /*enabled*/ + 1 /*dacEnabled*/ + 4 /*lengthCounter*/ + 1 /*lengthEnabled*/ + 4 /*frequency*/ + 4 /*timer*/ + 4 /*position*/ + 4 /*outputLevel*/ + 4 /*sampleArea*/ + 4 /*sampleCycles*/;
+const NoiseChannelSize: uint = 1 /*enabled*/ + 1 /*dacEnabled*/ + 4 /*lengthCounter*/ + 1 /*lengthEnabled*/ + 4 /*timer*/ + 2 /*lfsr*/ + EnvelopeSize + 4 /*sampleArea*/ + 4 /*sampleCycles*/;
+const ApuNrRegsSize: uint = 20; // nr10-nr14,nr21-nr24,nr30-nr34,nr41-nr44,nr50,nr51
+const ApuStateSize: uint = 1 /*poweredOn*/ + 4 /*frameSequencerStep*/ + 4 /*frameSequencerCycles*/ + PulseChannelSize * 2 + WaveChannelSize + NoiseChannelSize + ApuNrRegsSize + 16 /*waveRam*/ + 4 /*sampleCounter*/;
+
+const BusScalarSize: uint = 1 /*mode*/ + 1 /*vramBank*/ + 1 /*wramBank*/ + 8 /*cycles*/ + 8 /*hwCycles*/ + 1 /*doubleSpeed*/ + 1 /*speedSwitchPrepared*/ + 1 /*bcps*/ + 1 /*ocps*/;
+const BusLargeArraysSize: uint = 16384 /*vram*/ + 32768 /*wram*/ + 160 /*oam*/ + 127 /*hram*/ + 128 /*io*/ + 1 /*ie*/ + 64 /*bgPaletteRam*/ + 64 /*objPaletteRam*/;
+
+// Mbc(Mbc.rux参照)は種別を問わず全フィールドを持つフラット構造体のため、
+// カートリッジ種別に関係なく常に同じサイズになる(BubiBoyLite Odin版のtagged
+// unionと異なりmbc_state_size相当の分岐は不要)。
+const MbcStateSize: uint = 1 /*kind*/ + 1 /*ramEnabled*/ + 1 /*romBankLow5*/ + 1 /*bankHigh2*/ + 1 /*ramMode*/ + 1 /*romBank*/ + 1 /*ramOrRtcSelect*/ + 5 /*rtc*/ + 5 /*latchedRtc*/ + 1 /*latchPrepared*/ + 8 /*rtcBaseUnix*/ + 1 /*romBankLow8*/ + 1 /*romBankHigh1*/ + 1 /*ramBank*/;
+
+/// 現在ロードされているカートリッジの構成(外部RAMサイズ)から決まる本体サイズ
+/// (ヘッダ含む)を計算する。`SaveStateWrite`はこのサイズちょうどのバッファへ、
+/// `SaveStateRead`はdecode前に`data.length`がこの値以上かを確認する(上記の
+/// 「現在の状態を壊さない」設計参照)。
+pub func SaveStateExpectedSize(bus: *Bus) -> uint {
+    return SaveStateHeaderSize + CpuStateSize + BusScalarSize + BusLargeArraysSize +
+        HdmaStateSize + TimerStateSize + PpuStateSize + ApuStateSize + MbcStateSize +
+        bus.cart.ramLength;
+}
+
+/// ROM ヘッダのグローバルチェックサム(0x014E-0x014F、ビッグエンディアン格納だが
+/// 本関数はそのまま2バイトの値として読み出すだけ)を返す。カートリッジロード成功時
+/// は必ずHeaderMinLen(0x150)以上の長さがあることが保証されている
+/// (`CartridgeParseHeader`)。
+func RomHeaderChecksum(rom: Slice<uint8>) -> uint16 {
+    if rom.length < 0x150 {
+        return 0;
+    }
+    return ((rom.data[0x014E] as uint16) << 8) | (rom.data[0x014F] as uint16);
+}
+
+// --- 書き込み ---
+
+func WriteCpuState(c: *var WriteCursor, cpu: *Cpu) {
+    PutU8(c, cpu.a);
+    PutU8(c, cpu.f);
+    PutU8(c, cpu.b);
+    PutU8(c, cpu.c);
+    PutU8(c, cpu.d);
+    PutU8(c, cpu.e);
+    PutU8(c, cpu.h);
+    PutU8(c, cpu.l);
+    PutU16(c, cpu.sp);
+    PutU16(c, cpu.pc);
+    PutBool(c, cpu.ime);
+    PutBool(c, cpu.halted);
+    PutBool(c, cpu.haltBug);
+    PutIntAsI32(c, cpu.imeDelay);
+    PutBool(c, cpu.stopped);
+    PutBool(c, cpu.illegalOpcodeHit);
+}
+
+func ReadCpuState(c: *var ReadCursor, cpu: *var Cpu) {
+    cpu.a = GetU8(c);
+    cpu.f = GetU8(c);
+    cpu.b = GetU8(c);
+    cpu.c = GetU8(c);
+    cpu.d = GetU8(c);
+    cpu.e = GetU8(c);
+    cpu.h = GetU8(c);
+    cpu.l = GetU8(c);
+    cpu.sp = GetU16(c);
+    cpu.pc = GetU16(c);
+    cpu.ime = GetBool(c);
+    cpu.halted = GetBool(c);
+    cpu.haltBug = GetBool(c);
+    cpu.imeDelay = GetIntAsI32(c);
+    cpu.stopped = GetBool(c);
+    cpu.illegalOpcodeHit = GetBool(c);
+}
+
+func WriteEnvelope(c: *var WriteCursor, e: *Envelope) {
+    PutI32(c, e.initialVolume);
+    PutBool(c, e.increase);
+    PutI32(c, e.period);
+    PutI32(c, e.timer);
+    PutI32(c, e.volume);
+}
+
+func ReadEnvelope(c: *var ReadCursor, e: *var Envelope) {
+    e.initialVolume = GetI32(c);
+    e.increase = GetBool(c);
+    e.period = GetI32(c);
+    e.timer = GetI32(c);
+    e.volume = GetI32(c);
+}
+
+func WriteSweep(c: *var WriteCursor, s: *Sweep) {
+    PutI32(c, s.period);
+    PutBool(c, s.negate);
+    PutI32(c, s.shift);
+    PutI32(c, s.timer);
+    PutI32(c, s.shadowFrequency);
+    PutBool(c, s.enabled);
+    PutBool(c, s.negateCalculatedSinceTrigger);
+}
+
+func ReadSweep(c: *var ReadCursor, s: *var Sweep) {
+    s.period = GetI32(c);
+    s.negate = GetBool(c);
+    s.shift = GetI32(c);
+    s.timer = GetI32(c);
+    s.shadowFrequency = GetI32(c);
+    s.enabled = GetBool(c);
+    s.negateCalculatedSinceTrigger = GetBool(c);
+}
+
+func WritePulseChannel(c: *var WriteCursor, ch: *PulseChannel) {
+    PutBool(c, ch.enabled);
+    PutBool(c, ch.dacEnabled);
+    PutU8(c, ch.duty);
+    PutU8(c, ch.dutyStep);
+    PutI32(c, ch.lengthCounter);
+    PutBool(c, ch.lengthEnabled);
+    PutI32(c, ch.frequency);
+    PutI32(c, ch.timer);
+    WriteEnvelope(c, @ch.envelope);
+    WriteSweep(c, @ch.sweep);
+}
+
+func ReadPulseChannel(c: *var ReadCursor, ch: *var PulseChannel) {
+    ch.enabled = GetBool(c);
+    ch.dacEnabled = GetBool(c);
+    ch.duty = GetU8(c);
+    ch.dutyStep = GetU8(c);
+    ch.lengthCounter = GetI32(c);
+    ch.lengthEnabled = GetBool(c);
+    ch.frequency = GetI32(c);
+    ch.timer = GetI32(c);
+    ReadEnvelope(c, @ch.envelope);
+    ReadSweep(c, @ch.sweep);
+}
+
+func WriteWaveChannel(c: *var WriteCursor, ch: *WaveChannel) {
+    PutBool(c, ch.enabled);
+    PutBool(c, ch.dacEnabled);
+    PutI32(c, ch.lengthCounter);
+    PutBool(c, ch.lengthEnabled);
+    PutI32(c, ch.frequency);
+    PutI32(c, ch.timer);
+    PutI32(c, ch.position);
+    PutI32(c, ch.outputLevel);
+    PutI32(c, ch.sampleArea); // 区間平均アキュムレータ(apu.odin T20-2/T20-4相当)
+    PutI32(c, ch.sampleCycles);
+}
+
+func ReadWaveChannel(c: *var ReadCursor, ch: *var WaveChannel) {
+    ch.enabled = GetBool(c);
+    ch.dacEnabled = GetBool(c);
+    ch.lengthCounter = GetI32(c);
+    ch.lengthEnabled = GetBool(c);
+    ch.frequency = GetI32(c);
+    ch.timer = GetI32(c);
+    ch.position = GetI32(c);
+    ch.outputLevel = GetI32(c);
+    ch.sampleArea = GetI32(c);
+    ch.sampleCycles = GetI32(c);
+}
+
+func WriteNoiseChannel(c: *var WriteCursor, ch: *NoiseChannel) {
+    PutBool(c, ch.enabled);
+    PutBool(c, ch.dacEnabled);
+    PutI32(c, ch.lengthCounter);
+    PutBool(c, ch.lengthEnabled);
+    PutI32(c, ch.timer);
+    PutU16(c, ch.lfsr);
+    WriteEnvelope(c, @ch.envelope);
+    PutI32(c, ch.sampleArea);
+    PutI32(c, ch.sampleCycles);
+}
+
+func ReadNoiseChannel(c: *var ReadCursor, ch: *var NoiseChannel) {
+    ch.enabled = GetBool(c);
+    ch.dacEnabled = GetBool(c);
+    ch.lengthCounter = GetI32(c);
+    ch.lengthEnabled = GetBool(c);
+    ch.timer = GetI32(c);
+    ch.lfsr = GetU16(c);
+    ReadEnvelope(c, @ch.envelope);
+    ch.sampleArea = GetI32(c);
+    ch.sampleCycles = GetI32(c);
+}
+
+// リングバッファ(ring*)は保存しない(落とし穴: 単なる出力先バッファでゲーム状態
+// ではない)。`ReadApuState`は「復元直後は空」という前提を実際に成立させるため、
+// インデックス(ringRead/ringWrite/ringCount)を明示的にクリアする(BubiBoyLite
+// T20-6相当。復元前の古いサンプルが復元後も再生され続けるギャップを防ぐ)。
+func WriteApuState(c: *var WriteCursor, apu: *Apu) {
+    PutBool(c, apu.poweredOn);
+    PutI32(c, apu.frameSequencerStep);
+    PutI32(c, apu.frameSequencerCycles);
+    WritePulseChannel(c, @apu.pulse1);
+    WritePulseChannel(c, @apu.pulse2);
+    WriteWaveChannel(c, @apu.wave);
+    WriteNoiseChannel(c, @apu.noise);
+
+    PutU8(c, apu.nr10);
+    PutU8(c, apu.nr11);
+    PutU8(c, apu.nr12);
+    PutU8(c, apu.nr13);
+    PutU8(c, apu.nr14);
+    PutU8(c, apu.nr21);
+    PutU8(c, apu.nr22);
+    PutU8(c, apu.nr23);
+    PutU8(c, apu.nr24);
+    PutU8(c, apu.nr30);
+    PutU8(c, apu.nr31);
+    PutU8(c, apu.nr32);
+    PutU8(c, apu.nr33);
+    PutU8(c, apu.nr34);
+    PutU8(c, apu.nr41);
+    PutU8(c, apu.nr42);
+    PutU8(c, apu.nr43);
+    PutU8(c, apu.nr44);
+    PutU8(c, apu.nr50);
+    PutU8(c, apu.nr51);
+
+    PutBytes(c, @apu.waveRam[0], 16);
+    PutI32(c, apu.sampleCounter);
+}
+
+func ReadApuState(c: *var ReadCursor, apu: *var Apu) {
+    apu.poweredOn = GetBool(c);
+    apu.frameSequencerStep = GetI32(c);
+    apu.frameSequencerCycles = GetI32(c);
+    ReadPulseChannel(c, @apu.pulse1);
+    ReadPulseChannel(c, @apu.pulse2);
+    ReadWaveChannel(c, @apu.wave);
+    ReadNoiseChannel(c, @apu.noise);
+
+    apu.nr10 = GetU8(c);
+    apu.nr11 = GetU8(c);
+    apu.nr12 = GetU8(c);
+    apu.nr13 = GetU8(c);
+    apu.nr14 = GetU8(c);
+    apu.nr21 = GetU8(c);
+    apu.nr22 = GetU8(c);
+    apu.nr23 = GetU8(c);
+    apu.nr24 = GetU8(c);
+    apu.nr30 = GetU8(c);
+    apu.nr31 = GetU8(c);
+    apu.nr32 = GetU8(c);
+    apu.nr33 = GetU8(c);
+    apu.nr34 = GetU8(c);
+    apu.nr41 = GetU8(c);
+    apu.nr42 = GetU8(c);
+    apu.nr43 = GetU8(c);
+    apu.nr44 = GetU8(c);
+    apu.nr50 = GetU8(c);
+    apu.nr51 = GetU8(c);
+
+    GetBytes(c, @apu.waveRam[0], 16);
+    apu.sampleCounter = GetI32(c);
+
+    apu.ringRead = 0;
+    apu.ringWrite = 0;
+    apu.ringCount = 0;
+}
+
+// タグ(kind)値はcartridge.odin相当のMbcKindと同じ並び(RomOnly/Mbc1/Mbc2/Mbc3/Mbc5)。
+// 復元側は「現在ロードされているカートリッジと同じ種別である」ことをROMチェックサム
+// 一致で保証されている前提で、全フィールドをそのまま読み戻す
+// (Mbc.rux参照、種別を問わずフラット構造体のためタグによる分岐は不要)。
+func WriteMbcState(c: *var WriteCursor, mbc: *Mbc) {
+    PutU8(c, mbc.kind as uint8);
+    PutBool(c, mbc.ramEnabled);
+    PutU8(c, mbc.romBankLow5);
+    PutU8(c, mbc.bankHigh2);
+    PutBool(c, mbc.ramMode);
+    PutU8(c, mbc.romBank);
+    PutU8(c, mbc.ramOrRtcSelect);
+    PutBytes(c, @mbc.rtc[0], 5);
+    PutBytes(c, @mbc.latchedRtc[0], 5);
+    PutBool(c, mbc.latchPrepared);
+    PutU64(c, mbc.rtcBaseUnix);
+    PutU8(c, mbc.romBankLow8);
+    PutU8(c, mbc.romBankHigh1);
+    PutU8(c, mbc.ramBank);
+}
+
+func ReadMbcState(c: *var ReadCursor, mbc: *var Mbc) {
+    let _tag = GetU8(c); // 種別自体はロード済みROMから自明なので検査しない
+    mbc.ramEnabled = GetBool(c);
+    mbc.romBankLow5 = GetU8(c);
+    mbc.bankHigh2 = GetU8(c);
+    mbc.ramMode = GetBool(c);
+    mbc.romBank = GetU8(c);
+    mbc.ramOrRtcSelect = GetU8(c);
+    GetBytes(c, @mbc.rtc[0], 5);
+    GetBytes(c, @mbc.latchedRtc[0], 5);
+    mbc.latchPrepared = GetBool(c);
+    mbc.rtcBaseUnix = GetU64(c);
+    mbc.romBankLow8 = GetU8(c);
+    mbc.romBankHigh1 = GetU8(c);
+    mbc.ramBank = GetU8(c);
+}
+
+func WritePpuState(c: *var WriteCursor, p: *Ppu) {
+    PutU8(c, p.lcdc);
+    PutU8(c, p.statEnable);
+    PutU8(c, p.scy);
+    PutU8(c, p.scx);
+    PutU8(c, p.ly);
+    PutU8(c, p.lyc);
+    PutU8(c, p.bgp);
+    PutU8(c, p.obp0);
+    PutU8(c, p.obp1);
+    PutU8(c, p.wy);
+    PutU8(c, p.wx);
+    PutU8(c, p.mode);
+    PutBool(c, p.lycEqual);
+    PutIntAsI32(c, p.dot);
+    PutIntAsI32(c, p.windowLine);
+    PutBool(c, p.statIrqLine);
+
+    // uint32のframebufferはポインタ再解釈せず要素ごとにリトルエンディアンで書く。
+    var i: uint = 0;
+    while i < 23040 {
+        PutU32(c, p.framebuffer[i]);
+        i += 1;
+    }
+}
+
+func ReadPpuState(c: *var ReadCursor, p: *var Ppu) {
+    p.lcdc = GetU8(c);
+    p.statEnable = GetU8(c);
+    p.scy = GetU8(c);
+    p.scx = GetU8(c);
+    p.ly = GetU8(c);
+    p.lyc = GetU8(c);
+    p.bgp = GetU8(c);
+    p.obp0 = GetU8(c);
+    p.obp1 = GetU8(c);
+    p.wy = GetU8(c);
+    p.wx = GetU8(c);
+    p.mode = GetU8(c);
+    p.lycEqual = GetBool(c);
+    p.dot = GetIntAsI32(c);
+    p.windowLine = GetIntAsI32(c);
+    p.statIrqLine = GetBool(c);
+
+    var i: uint = 0;
+    while i < 23040 {
+        p.framebuffer[i] = GetU32(c);
+        i += 1;
+    }
+}
+
+func WriteBusState(c: *var WriteCursor, bus: *Bus) {
+    PutU8(c, bus.mode as uint8);
+    PutU8(c, bus.vramBank);
+    PutU8(c, bus.wramBank);
+    PutU64(c, bus.cycles);
+    PutU64(c, bus.hwCycles);
+    PutBool(c, bus.doubleSpeed);
+    PutBool(c, bus.speedSwitchPrepared);
+    PutU8(c, bus.bcps);
+    PutU8(c, bus.ocps);
+
+    PutBytes(c, @bus.vram[0], 16384);
+    PutBytes(c, @bus.wram[0], 32768);
+    PutBytes(c, @bus.oam[0], 160);
+    PutBytes(c, @bus.hram[0], 127);
+    PutBytes(c, @bus.io[0], 128);
+    PutU8(c, bus.ie);
+    PutBytes(c, @bus.bgPaletteRam[0], 64);
+    PutBytes(c, @bus.objPaletteRam[0], 64);
+
+    PutU16(c, bus.hdmaSource);
+    PutU16(c, bus.hdmaDestination);
+    PutIntAsI32(c, bus.hdmaRemaining);
+    PutBool(c, bus.hdmaActive);
+    PutBool(c, bus.hdmaAborted);
+    PutIntAsI32(c, bus.hdmaAbortedRemaining);
+
+    WriteTimerState(c, bus);
+    WritePpuState(c, @bus.ppu);
+    WriteApuState(c, @bus.apu);
+    WriteMbcState(c, @bus.cart.mbc);
+    PutBytes(c, @bus.cart.ram[0], bus.cart.ramLength);
+}
+
+func ReadBusState(c: *var ReadCursor, bus: *var Bus) {
+    bus.mode = GetU8(c) as GbMode;
+    bus.vramBank = GetU8(c);
+    bus.wramBank = GetU8(c);
+    bus.cycles = GetU64(c);
+    bus.hwCycles = GetU64(c);
+    bus.doubleSpeed = GetBool(c);
+    bus.speedSwitchPrepared = GetBool(c);
+    bus.bcps = GetU8(c);
+    bus.ocps = GetU8(c);
+
+    GetBytes(c, @bus.vram[0], 16384);
+    GetBytes(c, @bus.wram[0], 32768);
+    GetBytes(c, @bus.oam[0], 160);
+    GetBytes(c, @bus.hram[0], 127);
+    GetBytes(c, @bus.io[0], 128);
+    bus.ie = GetU8(c);
+    GetBytes(c, @bus.bgPaletteRam[0], 64);
+    GetBytes(c, @bus.objPaletteRam[0], 64);
+
+    bus.hdmaSource = GetU16(c);
+    bus.hdmaDestination = GetU16(c);
+    bus.hdmaRemaining = GetIntAsI32(c);
+    bus.hdmaActive = GetBool(c);
+    bus.hdmaAborted = GetBool(c);
+    bus.hdmaAbortedRemaining = GetIntAsI32(c);
+
+    ReadTimerState(c, bus);
+    ReadPpuState(c, @bus.ppu);
+    ReadApuState(c, @bus.apu);
+    ReadMbcState(c, @bus.cart.mbc);
+    GetBytes(c, @bus.cart.ram[0], bus.cart.ramLength);
+}
+
+func WriteTimerState(c: *var WriteCursor, bus: *Bus) {
+    PutU16(c, bus.divCounter);
+    PutU8(c, bus.tima);
+    PutU8(c, bus.tma);
+    PutU8(c, bus.tac);
+    PutIntAsI32(c, bus.timerReloadPending);
+    PutBool(c, bus.timerReloadJustHappened);
+}
+
+func ReadTimerState(c: *var ReadCursor, bus: *var Bus) {
+    bus.divCounter = GetU16(c);
+    bus.tima = GetU8(c);
+    bus.tma = GetU8(c);
+    bus.tac = GetU8(c);
+    bus.timerReloadPending = GetIntAsI32(c);
+    bus.timerReloadJustHappened = GetBool(c);
+}
+
+/// cpu/busの現在状態をdstへ書き込み、実際に書き込んだバイト数を返す。呼び出し側は
+/// 事前に`dst.length >= SaveStateExpectedSize(bus)`を保証すること
+/// (`SaveStateExpectedSize`ちょうどのバッファを渡すのが標準的な使い方)。
+pub func SaveStateWrite(cpu: *Cpu, bus: *Bus, dst: MutableSlice<uint8>) -> uint {
+    let expected = SaveStateExpectedSize(bus);
+    Assert(dst.length >= expected, "SaveStateWrite: dst is smaller than SaveStateExpectedSize");
+
+    var c = WriteCursor { dst: dst, pos: 0 };
+
+    PutU8(@c, SaveStateMagic0);
+    PutU8(@c, SaveStateMagic1);
+    PutU8(@c, SaveStateMagic2);
+    PutU8(@c, SaveStateMagic3);
+    PutU32(@c, SaveStateFormatVersion);
+    PutU16(@c, RomHeaderChecksum(bus.cart.rom));
+
+    WriteCpuState(@c, cpu);
+    WriteBusState(@c, bus);
+
+    // 内部不変条件: 実際に書き込んだバイト数はSaveStateExpectedSizeの計算値と
+    // ちょうど一致するはず(read側はこのサイズ計算だけを頼りに範囲外アクセスを
+    // 避けているため、ここがずれると静かに壊れる。フォーマット変更時にサイズ
+    // 計算の更新漏れを即検出する)。
+    Assert(c.pos == expected, "SaveStateWrite: bytes written do not match SaveStateExpectedSize");
+
+    return c.pos;
+}
+
+/// dataからcpu/busへ復元する。検証順: マジック/バージョン読み取りに必要な最小長 →
+/// マジック一致 → バージョン一致 → ROMチェックサム一致 → 本体サイズ充足。
+/// いずれかで失敗した場合、cpu/busには一切書き込まない(「現在の状態を壊さない」)。
+/// 全検証を通過して初めてcpu/busへ復元する。
+pub func SaveStateRead(cpu: *var Cpu, bus: *var Bus, data: Slice<uint8>) -> SaveStateError {
+    if data.length < SaveStateHeaderSize {
+        return SaveStateError::TooSmall;
+    }
+
+    var c = ReadCursor { src: data, pos: 0 };
+
+    if GetU8(@c) != SaveStateMagic0 || GetU8(@c) != SaveStateMagic1 ||
+        GetU8(@c) != SaveStateMagic2 || GetU8(@c) != SaveStateMagic3 {
+        return SaveStateError::BadMagic;
+    }
+
+    let version = GetU32(@c);
+    if version != SaveStateFormatVersion {
+        return SaveStateError::VersionMismatch;
+    }
+
+    let checksum = GetU16(@c);
+    if checksum != RomHeaderChecksum(bus.cart.rom) {
+        return SaveStateError::RomChecksumMismatch;
+    }
+
+    let expected = SaveStateExpectedSize(bus);
+    if data.length < expected {
+        return SaveStateError::TooSmall;
+    }
+
+    ReadCpuState(@c, cpu);
+    ReadBusState(@c, bus);
+
+    return SaveStateError::None;
+}

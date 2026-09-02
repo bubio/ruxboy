@@ -1,0 +1,15 @@
+[Manifest]
+Version = 1
+
+[Package]
+Name = "SaveStateTest"
+Version = "0.1.0"
+Type = "Executable"
+Description = "Roundtrip test for Core savestate serialize/restore (Phase 7)"
+
+[Dependencies]
+Core = { Path = "../../../../external/Rux/Packages/Core" }
+GbCore = { Path = "../../../../Packages/Core" }
+
+[Build]
+Output = "../../../../Bin/Tests/Packages/Core"
