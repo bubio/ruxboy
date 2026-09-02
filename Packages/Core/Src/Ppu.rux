@@ -451,24 +451,89 @@ func PpuRenderScanline(bus: *var Bus) {
     let wxMinus7 = (bus.ppu.wx as int) - 7;
     let winVisibleThisLine = winEnabled && ly >= (bus.ppu.wy as int) && wxMinus7 < 160;
 
+    // 落とし穴(性能): TileMapPixelを毎ピクセル呼ぶと、同じタイル内の8ピクセル
+    // すべてでタイルマップ/属性/タイルデータのVRAM読み出しを重複して行う
+    // ことになる(Rux Releaseが関数インライン化を行わない問題も重なり特に高コスト。
+    // Bus.rux の TimerTick と同じ対策方針)。タイル列(tileCol)とソース
+    // (BG/ウィンドウ)が変わったときだけタイルデータを取得し直す1ピクセル
+    // フェッチャー相当のキャッシュに書き換えた。結果はTileMapPixelを毎回
+    // 呼んだ場合と同一(dmg-acid2/cgb-acid2でピクセル完全一致を確認)。
     var x: uint = 0;
+    var haveTile = false;
+    var curTileCol: int = -1;
+    var curMapBase: uint16 = 0;
+    var curIsWindow = false;
+    var lowByte: uint8 = 0;
+    var highByte: uint8 = 0;
+    var tileXFlip = false;
+    var tilePalette: uint8 = 0;
+    var tilePriority = false;
+
     while x < 160 {
-        var pixel: BgPixel;
-        if winVisibleThisLine && (x as int) >= wxMinus7 {
-            pixel = TileMapPixel(bus, winMapBase, bus.ppu.lcdc, (x as int) - wxMinus7, bus.ppu.windowLine);
+        let useWindow = winVisibleThisLine && (x as int) >= wxMinus7;
+        var sourceX: int;
+        var sourceY: int;
+        var mapBase: uint16;
+        if useWindow {
+            sourceX = (x as int) - wxMinus7;
+            sourceY = bus.ppu.windowLine;
+            mapBase = winMapBase;
         } else {
-            let sourceX = ((x as int) + (bus.ppu.scx as int)) & 0xFF;
-            let sourceY = (ly + (bus.ppu.scy as int)) & 0xFF;
-            pixel = TileMapPixel(bus, bgMapBase, bus.ppu.lcdc, sourceX, sourceY);
+            sourceX = ((x as int) + (bus.ppu.scx as int)) & 0xFF;
+            sourceY = (ly + (bus.ppu.scy as int)) & 0xFF;
+            mapBase = bgMapBase;
         }
 
-        bus.ppu.bgColorIndex[x] = pixel.colorNumber;
-        bus.ppu.bgCgbPalette[x] = pixel.palette;
-        bus.ppu.bgCgbPriority[x] = pixel.priority;
+        let tileCol = sourceX / 8;
+
+        if !haveTile || tileCol != curTileCol || mapBase != curMapBase || useWindow != curIsWindow {
+            let tileRow = sourceY / 8;
+            let tileMapAddr = mapBase + ((tileRow * 32 + tileCol) as uint16);
+            let tileIndex = bus.vram[(tileMapAddr - 0x8000) as uint];
+
+            var attr: uint8 = 0;
+            if bus.mode == GbMode::Cgb {
+                attr = bus.vram[VramBankSize + (tileMapAddr - 0x8000) as uint];
+            }
+
+            var rowInTile = sourceY % 8;
+            if (attr & CgbAttrYFlip) != 0 {
+                rowInTile = 7 - rowInTile;
+            }
+
+            var tileBank: uint = 0;
+            if (attr & CgbAttrBank) != 0 {
+                tileBank = 1;
+            }
+
+            let tileAddr = BgTileDataAddr(bus.ppu.lcdc, tileIndex, rowInTile);
+            let base = tileBank * VramBankSize + (tileAddr - 0x8000) as uint;
+            lowByte = bus.vram[base];
+            highByte = bus.vram[base + 1];
+            tileXFlip = (attr & CgbAttrXFlip) != 0;
+            tilePalette = attr & CgbAttrPaletteMask;
+            tilePriority = (attr & CgbAttrBgPriority) != 0;
+
+            curTileCol = tileCol;
+            curMapBase = mapBase;
+            curIsWindow = useWindow;
+            haveTile = true;
+        }
+
+        var colInTile = sourceX % 8;
+        if tileXFlip {
+            colInTile = 7 - colInTile;
+        }
+        let shift = (7 - colInTile) as uint;
+        let colorNumber = ((lowByte >> shift) & 0x01) | (((highByte >> shift) & 0x01) << 1);
+
+        bus.ppu.bgColorIndex[x] = colorNumber;
+        bus.ppu.bgCgbPalette[x] = tilePalette;
+        bus.ppu.bgCgbPriority[x] = tilePriority;
         if bus.mode == GbMode::Cgb {
-            bus.ppu.framebuffer[lineStart + x] = CgbPaletteColor(bus, false, pixel.palette, pixel.colorNumber);
+            bus.ppu.framebuffer[lineStart + x] = CgbPaletteColor(bus, false, tilePalette, colorNumber);
         } else {
-            let shade = (bus.ppu.bgp >> (pixel.colorNumber * 2)) & 0x03;
+            let shade = (bus.ppu.bgp >> (colorNumber * 2)) & 0x03;
             bus.ppu.framebuffer[lineStart + x] = DmgShade(shade);
         }
         x += 1;

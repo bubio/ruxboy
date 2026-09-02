@@ -15,8 +15,15 @@ const SampleRate: int32 = 48000;
 const Channels: int32 = 2;
 const BytesPerSample: int32 = 2;
 /// ペーシングの目標: キューに積まれたバイト数がこれを超える間は新フレームの
-/// 生成を待つ(=オーディオの消費速度で実行速度が決まる)。約4フレーム分。
-const TargetQueuedBytes: int32 = (SampleRate / 60) * Channels * BytesPerSample * 4;
+/// 生成を待つ(=オーディオの消費速度で実行速度が決まる)。約8フレーム分
+/// (≈133ms)。フレーム毎のCPU/PPU処理時間が瞬間的にばらついても
+/// (GC的な一時停止・OSスケジューリングのジッタ・重い描画シーン等)
+/// オーディオデバイス側のキューが枯渇して音切れするまでの余裕を確保する
+/// ための値。4フレーム分(≈66ms)では実ゲームで途切れが報告されたため
+/// 増やした(体感遅延は増えるが、入力遅延がシビアなジャンルではないため
+/// 許容する)。恒常的にフレーム処理が16.7msを超える場合はこの余裕では
+/// 隠しきれない — その場合はCPU/PPU側のスループット改善が必要。
+const TargetQueuedBytes: int32 = (SampleRate / 60) * Channels * BytesPerSample * 8;
 
 pub struct Audio {
     pub stream: *opaque;
