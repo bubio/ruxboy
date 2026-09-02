@@ -660,10 +660,18 @@ func PpuRenderSprites(bus: *var Bus, lineStart: uint) {
 
         // CGBのOAM属性bit3はタイルデータの読み出し元VRAMバンクを選ぶ(DMGでは無視、
         // バンク0固定)。
-        var spriteTileBank: uint8 = 0;
+        var spriteTileBank: uint = 0;
         if bus.mode == GbMode::Cgb && (attr & CgbAttrBank) != 0 {
             spriteTileBank = 1;
         }
+
+        // 落とし穴(性能): tileAddr(延いてはこの2バイト)は列ループ全体で不変
+        // なのに、TilePixelColorNumberを列ごとに呼ぶと8列すべてで同じVRAM
+        // バイトを読み直すことになる。BGループと同じ理由でループ外へ1回だけ
+        // 出す(Bus.rux の TimerTick 参照)。
+        let tileBase = spriteTileBank * VramBankSize + (tileAddr - 0x8000) as uint;
+        let rowLow = bus.vram[tileBase];
+        let rowHigh = bus.vram[tileBase + 1];
 
         var col: int = 0;
         while col < 8 {
@@ -673,7 +681,8 @@ func PpuRenderSprites(bus: *var Bus, lineStart: uint) {
                 if (attr & OamAttrXFlip) != 0 {
                     sourceCol = 7 - col;
                 }
-                let colorNumber = TilePixelColorNumber(bus, spriteTileBank, tileAddr, sourceCol);
+                let shift = (7 - sourceCol) as uint;
+                let colorNumber = ((rowLow >> shift) & 0x01) | (((rowHigh >> shift) & 0x01) << 1);
                 if colorNumber != 0 {
                     pixelOwned[x as uint] = true;
 
