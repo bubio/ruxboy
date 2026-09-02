@@ -3,8 +3,18 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "spikes/**"
+      - "**/*.md"
+      - ".gitignore"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "spikes/**"
+      - "**/*.md"
+      - ".gitignore"
 
 jobs:
   build-macos:
