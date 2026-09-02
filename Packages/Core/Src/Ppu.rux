@@ -144,7 +144,9 @@ func PpuDisable(ppu: *var Ppu) {
     ppu.ly = 0;
     ppu.dot = 0;
     ppu.mode = ModeHBlank;
-    PpuUpdateLycEqual(ppu);
+    // 落とし穴(Mooneye stat_lyc_onoff): LCD off中はLYC比較器が止まるため、
+    // STAT bit2(LYC==LY)は直前の値を保持し続ける(LY=0に対して再計算しない)。
+    // 再計算が起きるのは PpuEnable(比較器の再起動)のときだけ。
 }
 
 func PpuStatConditionLine(ppu: *Ppu) -> bool {
@@ -191,8 +193,12 @@ pub func PpuWrite(bus: *var Bus, addr: uint16, value: uint8) {
         // 読み取り専用: 書き込みは無視(リセットではない)
     } else if addr == LycAddr {
         bus.ppu.lyc = value;
-        PpuUpdateLycEqual(@bus.ppu);
-        PpuUpdateStatIrq(bus);
+        // 落とし穴(Mooneye stat_lyc_onoff): LCD off中はLYC比較器が止まっている
+        // ため、LYC書き込みはSTAT bit2に反映されない。
+        if (bus.ppu.lcdc & LcdcBitLcdEnable) != 0 {
+            PpuUpdateLycEqual(@bus.ppu);
+            PpuUpdateStatIrq(bus);
+        }
     } else if addr == BgpAddr {
         bus.ppu.bgp = value;
     } else if addr == Obp0Addr {

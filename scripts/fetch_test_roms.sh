@@ -19,7 +19,7 @@ MOONEYE_BASE_URL="https://raw.githubusercontent.com/asoderman/Mooneye-Test-Suite
 
 mkdir -p "$BLARGG_DIR/cpu_instrs/individual" "$BLARGG_DIR/instr_timing" \
 	"$ROMS_DIR/mooneye/acceptance/timer" "$ROMS_DIR/mooneye/acceptance/interrupts" \
-	"$ROMS_DIR/acid2"
+	"$ROMS_DIR/mooneye/acceptance/ppu" "$ROMS_DIR/acid2"
 
 fetch() {
 	remote_path="$1"
@@ -94,6 +94,12 @@ do
 	fetch_mooneye "acceptance/$name.gb" "$ROMS_DIR/mooneye/acceptance/$name.gb"
 done
 fetch_mooneye "acceptance/interrupts/ie_push.gb" "$ROMS_DIR/mooneye/acceptance/interrupts/ie_push.gb"
+
+# acceptance/ppu: STAT blocking / LYC on-off の acceptance ROM(フェーズ3)
+for name in stat_irq_blocking stat_lyc_onoff
+do
+	fetch_mooneye "acceptance/ppu/$name.gb" "$ROMS_DIR/mooneye/acceptance/ppu/$name.gb"
+done
 
 # dmg-acid2 (フェーズ3): mattcurrie/dmg-acid2 のリリース資産から直接取得する
 # (retrio/gb-test-roms や asoderman/Mooneye-Test-Suite-ROMS とはリポジトリが異なる)。

@@ -170,6 +170,9 @@ func Main() -> int {
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/reti_timing.gb\0", "reti_timing", false, "known OAM DMA + RETI timing difference") { allPassed = false; }
     if !RunMooneyeRom("tests/roms/mooneye/acceptance/interrupts/ie_push.gb\0", "ie_push", true, "") { allPassed = false; }
 
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/ppu/stat_irq_blocking.gb\0", "stat_irq_blocking", true, "") { allPassed = false; }
+    if !RunMooneyeRom("tests/roms/mooneye/acceptance/ppu/stat_lyc_onoff.gb\0", "stat_lyc_onoff", false, "known LCD on/off LYC comparator edge case") { allPassed = false; }
+
     if allPassed {
         PrintLine("=== All Mooneye Tests Passed! ===");
         return 0;
