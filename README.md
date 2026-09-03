@@ -1,35 +1,60 @@
 # RuxBoy
 
-Game Boy Color エミュレーター。[Rux 言語](https://rux-lang.dev/) で書かれ、マルチメディア層に SDL3 を使うコマンドラインアプリです。
+**English** | [日本語](README.ja.md)
 
-コアは BubiBoy Lite (Odin + SDL2, MIT License) を Rux へ移植したものです。
+<p align="center">
+  <img src="docs/CoverArt.png" alt="Cover" width="*" height="*">
+</p>
 
-## 対応プラットフォーム
+
+A Game Boy Color emulator, written in the [Rux language](https://rux-lang.dev/) with SDL3 for its multimedia layer. It's a command-line application.
+
+The core is a port of BubiBoy Lite (Odin + SDL2, MIT License) to Rux.
+
+Performance still has some rough edges. You'll probably need something in the Apple M4 class to run it comfortably.
+
+<p align="center">
+  <a href="https://github.com/bubio/ruxboy/releases/latest">
+    <img src="https://img.shields.io/github/v/release/bubio/ruxboy" alt="Latest Release">
+  </a>
+  <a href="https://github.com/bubio/ruxboy/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/bubio/ruxboy" alt="License">
+  </a>
+  <a href="https://github.com/bubio/ruxboy/actions/workflows/ci.yml">
+    <img src="https://github.com/bubio/ruxboy/actions/workflows/ci.yml/badge.svg">
+  </a>
+  <a href="https://github.com/bubio/ruxboy/releases/latest">
+    <img src="https://img.shields.io/github/downloads/bubio/ruxboy/total.svg" alt="Downloads">
+  </a>
+</p>
+
+
+## Supported platforms
 
 - macOS 13.5+ (Intel / Apple Silicon)
 - Ubuntu 26.04+ (amd64 / arm64)
 - Windows 11+ (x64)
 
-## インストール
+## Installation
 
-[Releases](../../releases) から対応する zip をダウンロードして展開してください。
+Download the zip for your platform from [Releases](../../releases) and extract it.
 
-- **macOS / Linux**: 実行には SDL3 のランタイムが別途必要です。
-  macOS は `brew install sdl3`、Ubuntu 26.04+ は `sudo apt-get install libsdl3-0`
-  で導入できます(開発用の `-dev` パッケージは不要です)。
-- **Windows**: zip に `SDL3.dll` が同梱されているため追加の準備は不要です。
-  `RuxBoy.exe` と同じフォルダに置いたまま実行してください。
-- **macOS**: 未署名バイナリのため、初回実行時に Gatekeeper が開発元を確認できない
-  旨の警告を出すことがあります。その場合は `xattr -d com.apple.quarantine
-  ./RuxBoy` を実行するか、Finder でバイナリを右クリックして **開く** を選んで
-  ください。
+- **macOS / Linux**: the SDL3 runtime must be installed separately.
+  On macOS, `brew install sdl3`; on Ubuntu 26.04+, `sudo apt-get install libsdl3-0`
+  (the `-dev` package is not needed).
+- **Windows**: the zip already bundles `SDL3.dll`, so no extra setup is
+  required. Just keep it next to `RuxBoy.exe`.
+- **macOS**: since the binary is unsigned, Gatekeeper may warn on first launch
+  that the developer can't be verified. If that happens, run `xattr -d
+  com.apple.quarantine ./RuxBoy`, or right-click the binary in Finder and
+  choose **Open**.
 
-## ビルド
+## Building from source
 
-コンパイラと標準ライブラリは submodule (`external/Rux`) から取得します。
+The compiler and standard library are fetched from a submodule (`external/Rux`).
 
 ```sh
-git clone --recurse-submodules <このリポジトリのURL>
+git clone --recurse-submodules <this repository's URL>
 cd RuxBoy
 ```
 
@@ -51,22 +76,22 @@ sh scripts/build_linux.sh --release
 
 ### Windows
 
-Visual Studio(Desktop development with C++)と LLVM 22 が必要です。ビルドは
-Visual Studio の開発者環境(`vcvarsall.bat`)を読み込んだ同一シェルセッション内
-で行ってください。
+Requires Visual Studio (Desktop development with C++) and LLVM 22. Run the
+build from inside the same shell session where you've loaded the Visual
+Studio developer environment (`vcvarsall.bat`).
 
 ```powershell
-# Developer PowerShell for VS 内で実行
+# Run inside Developer PowerShell for VS
 cd external\Rux
-.\Run.ps1 build -Compiler <LLVM 22 の clang++.exe へのパス>
+.\Run.ps1 build -Compiler <path to LLVM 22's clang++.exe>
 cd ..\..
 sh scripts/fetch_sdl3_windows.sh
 sh scripts/build_windows.sh --release
 ```
 
-ビルド成果物は `Packages/App/Bin/Release/<OS>/<Arch>/RuxBoy[.exe]` に生成されます。
+The build output is placed at `Packages/App/Bin/Release/<OS>/<Arch>/RuxBoy[.exe]`.
 
-## 使い方
+## Usage
 
 ```
 使用法: RuxBoy [options] game.gbc
@@ -79,18 +104,21 @@ sh scripts/build_windows.sh --release
   --recent          最近使ったROMの一覧を表示して終了
 ```
 
-### キーボードショートカット (ROM実行中)
+(The CLI's own `--help` output is currently Japanese-only; an English
+translation isn't provided yet.)
 
-| キー | 機能 |
+### Keyboard shortcuts (while a ROM is running)
+
+| Key | Function |
 |---|---|
-| 矢印キー | 十字キー |
+| Arrow keys | D-pad |
 | Z / X | B / A |
 | Enter | Start |
-| 右Shift | Select |
-| F1 | 現在のスロットへセーブステートを保存 |
-| F3 | 現在のスロットからセーブステートを復元 |
-| Esc | 終了 |
+| Right Shift | Select |
+| F1 | Save a savestate to the current slot |
+| F3 | Load a savestate from the current slot |
+| Esc | Quit |
 
-## ライセンス
+## License
 
 [MIT License](LICENSE)
