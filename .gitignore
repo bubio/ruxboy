@@ -10,5 +10,8 @@ Packages/*/Temp/
 # fetched test ROM artifacts
 tests/roms/
 
+# fetched Windows SDL3 runtime (scripts/fetch_sdl3_windows.sh)
+external/Sdl3Windows/
+
 # グローバル gitignore で Packages/ が除外されている場合に備えて明示的に追跡する
 !Packages/

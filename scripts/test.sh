@@ -6,6 +6,11 @@ set -eu
 
 dir=$(cd "$(dirname "$0")/.." && pwd)
 rux=${RUX:-$dir/external/Rux/Bin/rux}
+# Windows: 拡張子無しの"rux"は実在せず"rux.exe"のみ存在する。RUX未指定でも
+# 動くよう自動検出する(macOS/Linuxと同じ手順で使えるようにするため)。
+if [ ! -x "$rux" ] && [ -x "$rux.exe" ]; then
+    rux="$rux.exe"
+fi
 
 if [ ! -x "$rux" ]; then
     echo "コンパイラが見つからない: $rux" >&2

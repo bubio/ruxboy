@@ -103,14 +103,14 @@ pub func RecentPrint() {
     let count = RecentLoadAll(@entries[0], RecentMaxEntries);
     if count == 0 {
         let msg: Slice<char8> = "(最近使ったROMはありません)\n";
-        write(1, msg.data as *opaque, msg.length);
+        PlatformWrite(1, msg.data as *opaque, msg.length);
         return;
     }
     var i: uint = 0;
     while i < count {
         let bytes = PathBufAsSlice(@entries[i]);
-        write(1, bytes.data as *opaque, bytes.length);
-        write(1, "\n\0".data as *opaque, 1u);
+        PlatformWrite(1, bytes.data as *opaque, bytes.length);
+        PlatformWrite(1, "\n\0".data as *opaque, 1u);
         i += 1;
     }
 }

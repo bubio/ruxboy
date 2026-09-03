@@ -4,13 +4,37 @@ import GbCore::{ Cpu, Bus, GbMode, CpuReset, BusInit, BusPowerOn, BusLoadRom, Cp
 when #target.os {
     .macOS => const LibC = "libSystem.B.dylib";
     .Linux => const LibC = "libc.so.6";
+    .Windows => const LibC = "ucrtbase.dll";
     else => #Error("Unsupported operating system")
 }
 
-#Link(LibC)
-extern {
-    func write(fd: int32, buf: *opaque, count: uint) -> int64;
-    func gettimeofday(tv: *var TimeVal, tz: *opaque) -> int32;
+// Windows: `gettimeofday`はPOSIX専用でucrtbaseに無いため、`QueryPerformanceCounter`
+// (Kernel32.dll)による経過時間計測に置き換える(このベンチマークは経過時間の差分
+// しか使わないため、壁時計の絶対値である必要が無い)。`write`もucrtbaseでは
+// `_write`しかエクスポートしない(docs/dev/PLAN.md参照)。
+when #target.os {
+    .Windows => {
+        #Link(LibC)
+        extern {
+            func _write(fd: int32, buf: *opaque, count: uint32) -> int32;
+        }
+        #Link("Kernel32.dll")
+        extern {
+            func QueryPerformanceCounter(counter: *var int64) -> int32;
+            func QueryPerformanceFrequency(freq: *var int64) -> int32;
+        }
+    }
+    else => {
+        #Link(LibC)
+        extern {
+            func write(fd: int32, buf: *opaque, count: uint) -> int64;
+            func gettimeofday(tv: *var TimeVal, tz: *opaque) -> int32;
+        }
+    }
+}
+
+func PWrite(fd: int32, buf: *opaque, count: uint) -> int64 {
+    when #target.os == .Windows { return _write(fd, buf, count as uint32) as int64; } else { return write(fd, buf, count); }
 }
 
 struct TimeVal {
@@ -23,7 +47,7 @@ const TargetTCycles: uint64 = 200000000;
 const GbcTCyclesPerSecond: uint64 = 4194304;
 
 func Print(text: Slice<char8>) {
-    write(1, text.data as *opaque, text.length);
+    PWrite(1, text.data as *opaque, text.length);
 }
 
 func PrintLine(text: Slice<char8>) {
@@ -43,7 +67,7 @@ func PrintUInt(value: uint64) {
         buf[i] = 48 + (n % 10) as uint8;
         n /= 10;
     }
-    write(1, @buf[i] as *opaque, (24 - i));
+    PWrite(1, @buf[i] as *opaque, (24 - i));
 }
 
 func PrintUIntLine(label: Slice<char8>, value: uint64) {
@@ -53,11 +77,19 @@ func PrintUIntLine(label: Slice<char8>, value: uint64) {
 }
 
 func NowMicros() -> uint64 {
-    var tv: TimeVal;
-    if gettimeofday(@tv, null) != 0 {
-        return 0;
+    when #target.os == .Windows {
+        var freq: int64 = 0;
+        var count: int64 = 0;
+        if QueryPerformanceFrequency(@freq) == 0 || freq == 0 { return 0; }
+        if QueryPerformanceCounter(@count) == 0 { return 0; }
+        return ((count as uint64) * 1000000) / (freq as uint64);
+    } else {
+        var tv: TimeVal;
+        if gettimeofday(@tv, null) != 0 {
+            return 0;
+        }
+        return (tv.tv_sec as uint64) * 1000000 + (tv.tv_usec as uint64);
     }
-    return (tv.tv_sec as uint64) * 1000000 + (tv.tv_usec as uint64);
 }
 
 func Main() -> int {

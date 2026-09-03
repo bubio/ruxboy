@@ -36,6 +36,12 @@ when #target.os {
             pub const SdlLibrary: Slice<char8> = "libSDL3.so.0";                      // apt (/usr) など既定検索パスに任せる
         }
     }
+    .Windows => {
+        // PEのインポートはDLLをファイル名で探す(macOSの絶対パス埋め込みに相当する仕組みがない)。
+        // 実行時は SDL3.dll が .exe と同じディレクトリにあればよい
+        // (ビルドスクリプトが Bin/<Profile>/Windows/<Arch>/ へコピーする、docs/dev/PLAN.md参照)。
+        pub const SdlLibrary: Slice<char8> = "SDL3.dll";
+    }
     else => #Error("Unsupported operating system")
 }
 

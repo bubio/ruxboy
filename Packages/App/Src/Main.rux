@@ -19,7 +19,7 @@ const FrameTCycles: uint64 = 70224;
 const MaxArgs: uint = 32;
 
 func Print(text: Slice<char8>) {
-    write(1, text.data as *opaque, text.length as uint);
+    PlatformWrite(1, text.data as *opaque, text.length as uint);
 }
 
 func PrintLine(text: Slice<char8>) {
@@ -28,6 +28,8 @@ func PrintLine(text: Slice<char8>) {
 }
 
 func Main() -> int {
+    EnsureUtf8Console();
+
     var argc: int32 = 0;
     let argv = Argv(@argc);
 

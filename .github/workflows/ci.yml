@@ -125,3 +125,75 @@ jobs:
         run: |
           bin="Packages/App/Bin/Release/Linux/${{ matrix.arch }}/RuxBoy"
           test -x "$bin" && echo "OK: $bin"
+
+  build-windows:
+    name: Build & Test (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Checkout external/Rux submodule
+        shell: bash
+        run: git submodule update --init --depth 1 external/Rux
+
+      - name: Cache Rux compiler
+        uses: actions/cache@v4
+        id: cache-rux
+        with:
+          path: external/Rux/Bin
+          key: rux-compiler-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('external/Rux/**/*.cpp', 'external/Rux/**/*.h', 'external/Rux/Run.ps1') }}
+
+      # ランナー既定のClangは22.1未満のため、external/RuxのRun.ps1が要求するバージョンを
+      # インストーラ無し(管理者権限不要)のtar.xzアーカイブから取得する
+      # (docs/dev/PLAN.md フェーズ9、ローカル検証で同じ方式を確認済み)。
+      - name: Fetch LLVM 22
+        if: steps.cache-rux.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz"
+          Invoke-WebRequest -Uri $url -OutFile llvm.tar.xz
+          New-Item -ItemType Directory -Force -Path llvm22 | Out-Null
+          tar -xJf llvm.tar.xz -C llvm22 --strip-components=1
+          Remove-Item llvm.tar.xz
+
+      - name: Build Rux compiler
+        if: steps.cache-rux.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: external/Rux
+        run: |
+          ./.github/scripts/Enter-VsDevEnv.ps1 -Arch amd64
+          ./Run.ps1 build -Compiler "$env:GITHUB_WORKSPACE/llvm22/bin/clang++.exe"
+
+      - name: Fetch Test ROMs
+        shell: bash
+        run: sh scripts/fetch_test_roms.sh
+
+      - name: Fetch SDL3 runtime
+        shell: bash
+        run: sh scripts/fetch_sdl3_windows.sh
+
+      - name: Run Tests (Debug)
+        shell: bash
+        run: sh scripts/test.sh
+
+      - name: Run Tests (Release)
+        shell: bash
+        run: sh scripts/test.sh --release
+
+      - name: Build RuxBoy (Debug)
+        shell: bash
+        run: sh scripts/build_windows.sh --debug
+
+      - name: Build RuxBoy (Release)
+        shell: bash
+        run: sh scripts/build_windows.sh --release
+
+      - name: Verify binary exists
+        shell: bash
+        run: |
+          bin="Packages/App/Bin/Release/Windows/x86-64/RuxBoy.exe"
+          test -f "$bin" && echo "OK: $bin"

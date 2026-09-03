@@ -4,41 +4,96 @@
 /// などの抽象を新たに導入するコストがフェーズ8のスコープに見合わないと判断し、既存の
 /// `Packages/App/Src/Main.rux`(フェーズ0)や `Tests/Packages/Core/Blargg`
 /// (`open`/`read`/`close`を自前で宣言)と同じ「必要最小限を自前で持つ」方針を踏襲した。
-/// 署名は `man 2 <name>` および `/usr/include` のヘッダに基づく。macOS/Linuxの両方に対応する
-/// (フェーズ9、Windowsは未対応)。ABIがOSごとに異なる箇所は`docs/dev/PLAN.md` 1.5参照。
+/// 署名は `man 2 <name>` および `/usr/include` のヘッダに基づく。macOS/Linux/Windowsに対応する
+/// (フェーズ9)。ABIがOSごとに異なる箇所は`docs/dev/PLAN.md` 1.5参照。
+///
+/// Windows: `open`/`read`/`write`/`close`/`lseek`/`unlink`/`mkdir`/`access`は
+/// `ucrtbase.dll`が非POSIX名(`_open`等、`<io.h>`/`<direct.h>`)でしかエクスポートしない
+/// ため、`external/Rux/Packages/C/Src/StdLib.rux`(`StdLib = "ucrtbase.dll"`)に倣い
+/// LibC名だけ揃え、実体は`Platform*`関数でOSごとに切り替える。`rename`/`getenv`/
+/// `malloc`/`calloc`/`free`/`time`はucrtbaseも無印でエクスポートするため共有できる
+/// (`external/Rux/Packages/C/Src/{StdLib,Time}.rux`で確認済み)。
 
 import Core::{ Slice, #target, #Error };
 
 when #target.os {
     .macOS => const LibC = "libSystem.B.dylib";
     .Linux => const LibC = "libc.so.6"; // glibc 2.34+ の推奨名(external/Rux/Packages/Linux/Src/Dynamic.rux参照)
+    .Windows => const LibC = "ucrtbase.dll";
     else => #Error("Unsupported operating system")
 }
 
 /// `mkdir`の`mode`引数の型。macOSは`mode_t`=`uint16`、Linuxは`unsigned int`(`uint32`)で
-/// 幅が異なる(docs/dev/PLAN.md 1.5(b))。
+/// 幅が異なる(docs/dev/PLAN.md 1.5(b))。Windowsの`_mkdir`は`mode`引数を取らないため未使用。
 when #target.os {
     .macOS => type ModeT = uint16;
     .Linux => type ModeT = uint32;
+    .Windows => type ModeT = uint32;
     else => #Error("Unsupported operating system")
 }
 
 #Link(LibC)
 extern {
-    func open(path: *char8, flags: int32, ...) -> int32;
-    func close(fd: int32) -> int32;
-    func read(fd: int32, buf: *var opaque, count: uint) -> int64;
-    func write(fd: int32, buf: *opaque, count: uint) -> int64;
-    func lseek(fd: int32, offset: int64, whence: int32) -> int64;
-    func unlink(path: *char8) -> int32;
     func rename(oldPath: *char8, newPath: *char8) -> int32;
-    func mkdir(path: *char8, mode: ModeT) -> int32;
-    func access(path: *char8, mode: int32) -> int32;
     func getenv(name: *char8) -> *char8;
     func malloc(size: uint) -> *var opaque;
     func calloc(count: uint, size: uint) -> *var opaque;
     func free(ptr: *var opaque);
-    func time(t: *var int64) -> int64;
+}
+
+// `time`は無印でエクスポートされないため(dumpbin /exports ucrtbase.dllで確認、
+// `_time64`のみ)、Windowsだけ別名で宣言する。
+when #target.os {
+    .Windows => {
+        #Link(LibC)
+        extern {
+            func _time64(t: *var int64) -> int64;
+        }
+    }
+    else => {
+        #Link(LibC)
+        extern {
+            func time(t: *var int64) -> int64;
+        }
+    }
+}
+
+when #target.os {
+    .Windows => {
+        // <io.h>/<direct.h>(Windows SDK 10.0.26100.0で確認)。非C++ビルドでは`_open`は
+        // マクロ経由の`_sopen_dispatch`ではなく`_ACRTIMP`エクスポートそのもの。
+        #Link(LibC)
+        extern {
+            func _open(path: *char8, flags: int32, ...) -> int32;
+            func _close(fd: int32) -> int32;
+            func _read(fd: int32, buf: *var opaque, count: uint32) -> int32;
+            func _write(fd: int32, buf: *opaque, count: uint32) -> int32;
+            func _lseeki64(fd: int32, offset: int64, whence: int32) -> int64;
+            func _unlink(path: *char8) -> int32;
+            func _mkdir(path: *char8) -> int32;
+            func _access(path: *char8, mode: int32) -> int32;
+        }
+        #Link("Kernel32.dll")
+        extern {
+            func GetCommandLineA() -> *char8;
+            func MoveFileExA(existingPath: *char8, newPath: *char8, flags: uint32) -> int32;
+            func SetConsoleOutputCP(codePageId: uint32) -> int32;
+            func SetConsoleCP(codePageId: uint32) -> int32;
+        }
+    }
+    else => {
+        #Link(LibC)
+        extern {
+            func open(path: *char8, flags: int32, ...) -> int32;
+            func close(fd: int32) -> int32;
+            func read(fd: int32, buf: *var opaque, count: uint) -> int64;
+            func write(fd: int32, buf: *opaque, count: uint) -> int64;
+            func lseek(fd: int32, offset: int64, whence: int32) -> int64;
+            func unlink(path: *char8) -> int32;
+            func mkdir(path: *char8, mode: ModeT) -> int32;
+            func access(path: *char8, mode: int32) -> int32;
+        }
+    }
 }
 
 // argv取得はOSごとに手段が異なる(macOSのみ_NSGetArgc/_NSGetArgvを持つ、下のArgv参照)ため、
@@ -57,8 +112,8 @@ when #target.os {
 pub const ORdOnly: int32 = 0x0000;
 pub const OWrOnly: int32 = 0x0001;
 
-/// `O_CREAT`/`O_TRUNC`のビット位置はDarwinとLinuxで異なる(docs/dev/PLAN.md 1.5(a))。
-/// 値をDarwinのまま流用すると`O_CREAT`が立たず、新規ファイル作成が黙って失敗する。
+/// `O_CREAT`/`O_TRUNC`のビット位置はDarwin/Linux/Windowsで異なる(docs/dev/PLAN.md 1.5(a))。
+/// 値を他OSのまま流用すると`O_CREAT`が立たず、新規ファイル作成が黙って失敗する。
 when #target.os {
     .macOS => {
         pub const OCreat: int32 = 0x0200;
@@ -68,12 +123,97 @@ when #target.os {
         pub const OCreat: int32 = 0x0040;
         pub const OTrunc: int32 = 0x0200;
     }
+    .Windows => {
+        pub const OCreat: int32 = 0x0100;
+        pub const OTrunc: int32 = 0x0200;
+    }
     else => #Error("Unsupported operating system")
+}
+
+/// Windowsはデフォルトでテキストモード(CRLF変換)。指定しないとROM/セーブ/セーブステートの
+/// バイナリ内容がCRLF変換で黙って壊れる。macOS/Linuxには相当する概念が無いため0(無効)。
+when #target.os {
+    .Windows => { pub const OBinary: int32 = 0x8000; }
+    else => { pub const OBinary: int32 = 0; }
 }
 
 pub const SeekSet: int32 = 0;
 pub const SeekEnd: int32 = 2;
 pub const FOk: int32 = 0;
+/// `MoveFileExW`/`MoveFileExA`の`MOVEFILE_REPLACE_EXISTING`。
+pub const MoveFileReplaceExisting: uint32 = 0x1;
+/// コードページ65001 = UTF-8。
+const CpUtf8: uint32 = 65001;
+
+/// Windowsのコンソールは既定でシステムのANSI/OEMコードページ(日本語環境では
+/// 通常Shift_JIS系)を使うため、UTF-8で書かれたソース中の日本語リテラルを
+/// そのまま`write`すると文字化けする。プロセス開始直後に一度呼び、コンソールの
+/// 入出力コードページをUTF-8へ切り替える(`--help`等のメッセージ表示前に
+/// `Main`冒頭から呼ぶこと)。macOS/Linuxのターミナルは既定でUTF-8なので何もしない。
+pub func EnsureUtf8Console() {
+    when #target.os == .Windows {
+        SetConsoleOutputCP(CpUtf8);
+        SetConsoleCP(CpUtf8);
+    }
+}
+
+func PlatformClose(fd: int32) -> int32 {
+    when #target.os == .Windows {
+        return _close(fd);
+    } else {
+        return close(fd);
+    }
+}
+
+func PlatformRead(fd: int32, buf: *var opaque, count: uint) -> int64 {
+    when #target.os == .Windows {
+        return _read(fd, buf, count as uint32) as int64;
+    } else {
+        return read(fd, buf, count);
+    }
+}
+
+/// stdout/stderrへの生書き込み(`Main.rux`/`Recent.rux`のログ出力用)。Windowsは
+/// `write`という無印シンボルをucrtbaseがエクスポートしないため`pub`にしてPackage内へ公開する。
+pub func PlatformWrite(fd: int32, buf: *opaque, count: uint) -> int64 {
+    when #target.os == .Windows {
+        return _write(fd, buf, count as uint32) as int64;
+    } else {
+        return write(fd, buf, count);
+    }
+}
+
+func PlatformLseek(fd: int32, offset: int64, whence: int32) -> int64 {
+    when #target.os == .Windows {
+        return _lseeki64(fd, offset, whence);
+    } else {
+        return lseek(fd, offset, whence);
+    }
+}
+
+func PlatformUnlink(path: *char8) -> int32 {
+    when #target.os == .Windows {
+        return _unlink(path);
+    } else {
+        return unlink(path);
+    }
+}
+
+func PlatformMkdir(path: *char8) -> int32 {
+    when #target.os == .Windows {
+        return _mkdir(path);
+    } else {
+        return mkdir(path, 0x1ED as ModeT); // 0755
+    }
+}
+
+func PlatformAccess(path: *char8, mode: int32) -> int32 {
+    when #target.os == .Windows {
+        return _access(path, mode);
+    } else {
+        return access(path, mode);
+    }
+}
 
 /// null終端の`*char8`をバイト長を数えて`Slice<char8>`にする(終端は含まない)。
 pub func CStrToSlice(s: *char8) -> Slice<char8> {
@@ -85,55 +225,65 @@ pub func CStrToSlice(s: *char8) -> Slice<char8> {
 }
 
 pub func PathExists(path: *char8) -> bool {
-    return access(path, FOk) == 0;
+    return PlatformAccess(path, FOk) == 0;
 }
 
 /// `path`を丸ごと読み込む。`length`に読み込んだバイト数を書く。所有権は呼び出し側に移る
 /// (`free`すること)。失敗時は null を返す。
 pub func ReadEntireFile(path: *char8, length: *var uint) -> *var uint8 {
-    let fd = open(path, ORdOnly);
+    var fd: int32 = 0;
+    when #target.os == .Windows {
+        fd = _open(path, ORdOnly | OBinary);
+    } else {
+        fd = open(path, ORdOnly);
+    }
     if fd < 0 {
         *length = 0;
         return null;
     }
-    let size = lseek(fd, 0, SeekEnd);
+    let size = PlatformLseek(fd, 0, SeekEnd);
     if size < 0 {
-        close(fd);
+        PlatformClose(fd);
         *length = 0;
         return null;
     }
-    lseek(fd, 0, SeekSet);
+    PlatformLseek(fd, 0, SeekSet);
 
     let buf = calloc((size as uint) + 1, 1) as *var uint8;
     if buf == null {
-        close(fd);
+        PlatformClose(fd);
         *length = 0;
         return null;
     }
 
     var total: int64 = 0;
     while total < size {
-        let n = read(fd, (buf + (total as uint)) as *var opaque, (size - total) as uint);
+        let n = PlatformRead(fd, (buf + (total as uint)) as *var opaque, (size - total) as uint);
         if n <= 0 { break; }
         total += n;
     }
-    close(fd);
+    PlatformClose(fd);
     *length = total as uint;
     return buf;
 }
 
 /// `data`を`path`へ書き込む(単純上書き。存在しなければ作成)。
 func WriteFileRaw(path: *char8, data: *uint8, length: uint) -> bool {
-    let fd = open(path, OWrOnly | OCreat | OTrunc, 0x1A4 as int32); // 0644
+    var fd: int32 = 0;
+    when #target.os == .Windows {
+        fd = _open(path, OWrOnly | OCreat | OTrunc | OBinary, 0x180 as int32); // _S_IREAD|_S_IWRITE
+    } else {
+        fd = open(path, OWrOnly | OCreat | OTrunc, 0x1A4 as int32); // 0644
+    }
     if fd < 0 { return false; }
     var total: uint = 0;
     var ok = true;
     while total < length {
-        let n = write(fd, (data + total) as *opaque, length - total);
+        let n = PlatformWrite(fd, (data + total) as *opaque, length - total);
         if n <= 0 { ok = false; break; }
         total += n as uint;
     }
-    close(fd);
+    PlatformClose(fd);
     return ok;
 }
 
@@ -143,15 +293,28 @@ func WriteFileRaw(path: *char8, data: *uint8, length: uint) -> bool {
 /// バックアップ(.bak)への退避は行わない — renameが同一ファイルシステム上でアトミックである
 /// ことに依拠し、「一時ファイル書き込み失敗時に既存ファイルへ影響しない」という核心の保証は
 /// 変わらないため、フェーズ8のスコープでは簡略化した)。
+///
+/// Windows: `rename`(ucrtbase, `MoveFileA`相当)は移動先が既存だと失敗する
+/// (POSIXのrenameは黙って置き換える)。`WriteFileRaw`は既に`path`と同じファイルシステム上に
+/// 一時ファイルを作っているため、`MoveFileExA`+`MOVEFILE_REPLACE_EXISTING`でアトミックな
+/// 置き換えを保つ(docs/dev/PLAN.md、フェーズ9調査時点のアドバイザー指摘)。
 pub func WriteFileAtomic(path: *char8, tmpPath: *char8, data: *uint8, length: uint) -> bool {
     if !WriteFileRaw(tmpPath, data, length) {
         return false;
     }
-    if rename(tmpPath, path) != 0 {
-        unlink(tmpPath);
-        return false;
+    when #target.os == .Windows {
+        if MoveFileExA(tmpPath, path, MoveFileReplaceExisting) == 0 {
+            PlatformUnlink(tmpPath);
+            return false;
+        }
+        return true;
+    } else {
+        if rename(tmpPath, path) != 0 {
+            PlatformUnlink(tmpPath);
+            return false;
+        }
+        return true;
     }
-    return true;
 }
 
 /// Linux: `/proc/self/cmdline`はNUL区切りの引数リスト(末尾もNUL)を持つ(procfsの規約)。
@@ -160,7 +323,15 @@ pub func WriteFileAtomic(path: *char8, tmpPath: *char8, data: *uint8, length: ui
 /// 返す配列・各文字列はプロセス終了まで生き続ける前提でfreeしない
 /// (macOS版の`_NSGetArgv`が指す領域も同様に呼び出し元は解放しない)。
 func LinuxArgv(argcOut: *var int32) -> *var *var char8 {
-    let fd = open("/proc/self/cmdline\0".data, ORdOnly);
+    // Windowsではこの関数は呼ばれない(`Argv`が`WindowsArgv`へ分岐する)が、
+    // 全ターゲットで型検査は通る必要があるため`open`/`read`/`close`を直接使わず
+    // `Platform*`(またはWindows専用の`_open`)経由にする。
+    var fd: int32 = 0;
+    when #target.os == .Windows {
+        fd = _open("/proc/self/cmdline\0".data, ORdOnly | OBinary);
+    } else {
+        fd = open("/proc/self/cmdline\0".data, ORdOnly);
+    }
     if fd < 0 {
         *argcOut = 0;
         return null;
@@ -170,11 +341,11 @@ func LinuxArgv(argcOut: *var int32) -> *var *var char8 {
     let buf = calloc(BufCap, 1) as *var uint8;
     var total: uint = 0;
     while total < BufCap - 1 {
-        let n = read(fd, (buf + total) as *var opaque, BufCap - 1 - total);
+        let n = PlatformRead(fd, (buf + total) as *var opaque, BufCap - 1 - total);
         if n <= 0 { break; }
         total += n as uint;
     }
-    close(fd);
+    PlatformClose(fd);
 
     var argc: int32 = 0;
     var i: uint = 0;
@@ -198,6 +369,79 @@ func LinuxArgv(argcOut: *var int32) -> *var *var char8 {
     return argv;
 }
 
+/// Windows: `GetCommandLineA`が返すコマンドライン全体(NUL終端の単一文字列)を、
+/// スペース/タブ区切り・ダブルクォート対応(クォート中の空白は区切りとして扱わない)で
+/// argvへ分割する。`CommandLineToArgvW`が実装するバックスラッシュエスケープ
+/// (`\"`→リテラル`"`等)までは対応しない — RuxBoyの引数にダブルクォートを含む
+/// バックスラッシュ列が現れる想定がなく(ROMパスにスペースが含まれる場合の
+/// `"C:\Games\Pokemon Crystal.gbc"`のようなクォート引用にのみ対応すれば十分なため)、
+/// 実装コストに見合わないと判断した。必要になれば拡張する。
+/// 返す配列・文字列はプロセス終了まで生き続ける前提でfreeしない(Linux/macOS版と同じ)。
+func WindowsArgv(argcOut: *var int32) -> *var *var char8 {
+    let cmdline = GetCommandLineA();
+    var len: uint = 0;
+    while *(cmdline + len) != 0 { len += 1; }
+
+    var argc: int32 = 0;
+    var inQuotes = false;
+    var inToken = false;
+    var i: uint = 0;
+    while i < len {
+        let c = *(cmdline + i);
+        if c == c8'"' {
+            if !inToken { inToken = true; argc += 1; }
+            inQuotes = !inQuotes;
+        } else if (c == c8' ' || c == c8'\t') && !inQuotes {
+            inToken = false;
+        } else {
+            if !inToken { inToken = true; argc += 1; }
+        }
+        i += 1;
+    }
+
+    let argv = calloc((argc as uint) + 1, sizeof(uint)) as *var *var char8;
+    let buf = calloc(len + 1, 1) as *var char8;
+
+    var argIndex: uint = 0;
+    var writePos: uint = 0;
+    inQuotes = false;
+    inToken = false;
+    i = 0;
+    while i < len {
+        let c = *(cmdline + i);
+        if c == c8'"' {
+            if !inToken {
+                inToken = true;
+                *(argv + argIndex) = buf + writePos;
+            }
+            inQuotes = !inQuotes;
+        } else if (c == c8' ' || c == c8'\t') && !inQuotes {
+            if inToken {
+                *(buf + writePos) = c8'\0';
+                writePos += 1;
+                argIndex += 1;
+                inToken = false;
+            }
+        } else {
+            if !inToken {
+                inToken = true;
+                *(argv + argIndex) = buf + writePos;
+            }
+            *(buf + writePos) = c;
+            writePos += 1;
+        }
+        i += 1;
+    }
+    if inToken {
+        *(buf + writePos) = c8'\0';
+        writePos += 1;
+        argIndex += 1;
+    }
+
+    *argcOut = argc;
+    return argv;
+}
+
 /// argv(先頭のプログラム名を含む)を返す。
 pub func Argv(argc: *var int32) -> *var *var char8 {
     when #target.os {
@@ -207,6 +451,9 @@ pub func Argv(argc: *var int32) -> *var *var char8 {
         }
         .Linux => {
             return LinuxArgv(argc);
+        }
+        .Windows => {
+            return WindowsArgv(argc);
         }
         else => {
             *argc = 0;
@@ -223,11 +470,15 @@ pub func GetEnv(name: *char8) -> *char8 {
 /// のため、壁時計の取得はapp側の責務 — `~/dev/_Emu/BubiBoyLite/src/app/saveram.odin`の
 /// `wall_clock_now`と同じ位置づけ)。
 pub func WallClockNow() -> int64 {
-    return time(null);
+    when #target.os == .Windows {
+        return _time64(null);
+    } else {
+        return time(null);
+    }
 }
 
 /// ディレクトリを作成する(既存なら成功扱い)。深さ1つ(親は既存前提)のみ対応。
 pub func EnsureDirectory(path: *char8) -> bool {
     if PathExists(path) { return true; }
-    return mkdir(path, 0x1ED as ModeT) == 0; // 0755
+    return PlatformMkdir(path) == 0;
 }

@@ -70,6 +70,16 @@ pub func AppDataDir(buf: *var PathBuf) -> bool {
             PathBufAppend(buf, "/RuxBoy");
             return true;
         }
+        .Windows => {
+            // Windowsの習慣: ユーザー設定は`%APPDATA%`(Roaming)配下(docs/dev/PLAN.md 1.6相当)。
+            // `%APPDATA%`自体はプロファイル作成時に必ず存在するため、Linuxと違い先掘りは不要。
+            let appData = GetEnv("APPDATA\0".data);
+            if appData == null { return false; }
+            PathBufClear(buf);
+            PathBufAppendCStr(buf, appData);
+            PathBufAppend(buf, "/RuxBoy");
+            return true;
+        }
         else => {
             return false;
         }
