@@ -731,45 +731,119 @@ pub func PpuTick(bus: *var Bus, tCycles: int) {
         return;
     }
 
+    // 最適化前(参考): dot/ly/mode を毎回 bus.ppu.* に直接読み書きしていた。
+    // Rux Release は mem2reg 相当の最適化(スタック/構造体メモリ上の変数を
+    // レジスタへ昇格する処理)を行わないため、ループ内で同じフィールドへ
+    // 繰り返し触れるコードはそのまま「毎回メモリを読み直し・書き直す」機械語に
+    // 直訳される。1 T-cycleごと(1ラインにつき456回)実行される最も熱いループ
+    // なので影響が大きい(CpuPerfベンチ+逆アセンブルで確認)。
+    //
+    // var cycle: int = 0;
+    // while cycle < tCycles {
+    //     let prevMode = bus.ppu.mode;
+    //     var lineAdvanced = false;
+    //     bus.ppu.dot += 1;
+    //     if bus.ppu.dot >= CyclesPerLine {
+    //         bus.ppu.dot = 0;
+    //         bus.ppu.ly += 1;
+    //         if (bus.ppu.ly as int) >= LinesPerFrame {
+    //             bus.ppu.ly = 0;
+    //             bus.ppu.windowLine = 0;
+    //         }
+    //         PpuUpdateLycEqual(@bus.ppu);
+    //         lineAdvanced = true;
+    //     }
+    //     // PpuModeFor をインライン化(呼び出しオーバーヘッド削減)
+    //     let ly = bus.ppu.ly;
+    //     let dot = bus.ppu.dot;
+    //     var mode: uint8 = ModeHBlank;
+    //     if (ly as int) >= VblankStartLine {
+    //         mode = ModeVBlank;
+    //     } else if dot < Mode2Dots {
+    //         mode = ModeOamScan;
+    //     } else if dot < Mode2Dots + Mode3Dots {
+    //         mode = ModeDraw;
+    //     }
+    //     bus.ppu.mode = mode;
+    //
+    //     if prevMode != ModeVBlank && bus.ppu.mode == ModeVBlank {
+    //         bus.io[0x0F] = bus.io[0x0F] | IntrVBlankBit;
+    //     }
+    //     if prevMode == ModeDraw && bus.ppu.mode == ModeHBlank {
+    //         PpuRenderScanline(bus);
+    //         HdmaOnHblank(bus); // T6-7: HDMA(HBlank毎16バイト転送)のフック
+    //     }
+    //
+    //     if lineAdvanced || prevMode != bus.ppu.mode {
+    //         PpuUpdateStatIrq(bus);
+    //     }
+    //     cycle += 1;
+    // }
+
+    // dot/ly/mode/windowLine をループの外で一度だけローカル変数へ読み出し、
+    // ループ内はローカル変数だけで計算する(Rux Releaseがmem2reg相当を
+    // 行わない対策。Bus.rux の TimerTick と同じ方針)。
+    // PpuRenderScanline/PpuUpdateLycEqual/PpuUpdateStatIrq は bus.ppu の
+    // dot/ly/mode/windowLine を読む(またはPpuRenderScanlineはwindowLineを
+    // 書く)ため、呼ぶ直前にローカル→bus.ppuへ同期し、windowLineは呼んだ
+    // 直後にbus.ppu→ローカルへ読み戻す。HdmaOnHblankはbus.ppuに触れないため
+    // 同期不要。
+    var dot = bus.ppu.dot;
+    var ly = bus.ppu.ly;
+    var mode = bus.ppu.mode;
+    var windowLine = bus.ppu.windowLine;
+
     var cycle: int = 0;
     while cycle < tCycles {
-        let prevMode = bus.ppu.mode;
+        let prevMode = mode;
         var lineAdvanced = false;
-        bus.ppu.dot += 1;
-        if bus.ppu.dot >= CyclesPerLine {
-            bus.ppu.dot = 0;
-            bus.ppu.ly += 1;
-            if (bus.ppu.ly as int) >= LinesPerFrame {
-                bus.ppu.ly = 0;
-                bus.ppu.windowLine = 0;
+        dot += 1;
+        if dot >= CyclesPerLine {
+            dot = 0;
+            ly += 1;
+            if (ly as int) >= LinesPerFrame {
+                ly = 0;
+                windowLine = 0;
             }
+            bus.ppu.ly = ly; // PpuUpdateLycEqualが読むため同期
             PpuUpdateLycEqual(@bus.ppu);
             lineAdvanced = true;
         }
         // PpuModeFor をインライン化(呼び出しオーバーヘッド削減)
-        let ly = bus.ppu.ly;
-        let dot = bus.ppu.dot;
-        var mode: uint8 = ModeHBlank;
+        var newMode: uint8 = ModeHBlank;
         if (ly as int) >= VblankStartLine {
-            mode = ModeVBlank;
+            newMode = ModeVBlank;
         } else if dot < Mode2Dots {
-            mode = ModeOamScan;
+            newMode = ModeOamScan;
         } else if dot < Mode2Dots + Mode3Dots {
-            mode = ModeDraw;
+            newMode = ModeDraw;
         }
-        bus.ppu.mode = mode;
+        mode = newMode;
 
-        if prevMode != ModeVBlank && bus.ppu.mode == ModeVBlank {
+        if prevMode != ModeVBlank && mode == ModeVBlank {
             bus.io[0x0F] = bus.io[0x0F] | IntrVBlankBit;
         }
-        if prevMode == ModeDraw && bus.ppu.mode == ModeHBlank {
+        if prevMode == ModeDraw && mode == ModeHBlank {
+            bus.ppu.dot = dot;
+            bus.ppu.ly = ly;
+            bus.ppu.mode = mode;
+            bus.ppu.windowLine = windowLine;
             PpuRenderScanline(bus);
             HdmaOnHblank(bus); // T6-7: HDMA(HBlank毎16バイト転送)のフック
+            windowLine = bus.ppu.windowLine; // PpuRenderScanlineが更新するため読み戻す
         }
 
-        if lineAdvanced || prevMode != bus.ppu.mode {
+        if lineAdvanced || prevMode != mode {
+            bus.ppu.dot = dot;
+            bus.ppu.ly = ly;
+            bus.ppu.mode = mode;
             PpuUpdateStatIrq(bus);
         }
         cycle += 1;
     }
+
+    bus.ppu.dot = dot;
+    bus.ppu.ly = ly;
+    bus.ppu.mode = mode;
+    bus.ppu.windowLine = windowLine;
 }
