@@ -124,7 +124,7 @@ func RunMbcRom(romBuf: *var uint8, capacity: uint, path: Slice<char8>, name: Sli
     while bus.cycles < timeout {
         CpuStep(@cpu, @bus);
         if cpu.ldBbHit {
-            if cpu.b == 3 && cpu.c == 5 && cpu.d == 8 && cpu.e == 13 && cpu.h == 21 && cpu.l == 34 {
+            if cpu.bc.bytes.hi == 3 && cpu.bc.bytes.lo == 5 && cpu.de.bytes.hi == 8 && cpu.de.bytes.lo == 13 && cpu.hl.bytes.hi == 21 && cpu.hl.bytes.lo == 34 {
                 Print("PASS: ");
                 PrintLine(name);
                 return true;

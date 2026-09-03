@@ -9,16 +9,27 @@ pub const FlagH: uint8 = 0x20;
 /// F レジスタ bit4: Carry フラグ。
 pub const FlagC: uint8 = 0x10;
 
+/// レジスタペアの下位/上位バイト分解(リトルエンディアン前提)。
+pub struct RegPairBytes {
+    pub lo: uint8;
+    pub hi: uint8;
+}
+
+/// 16bitレジスタペアを、シフト/マスクなしで8bit×2としても読み書きできる
+/// union(SameBoyの`GB_registers_t`と同じ設計意図)。`word`と`bytes`は同じ
+/// メモリを共有し、`bytes.hi`が上位バイト・`bytes.lo`が下位バイトになる
+/// (external/Rux/Tests/Language/Union で実機検証済み)。
+pub union RegPair {
+    pub word: uint16,
+    pub bytes: RegPairBytes
+}
+
 /// SM83 CPU のレジスタ・内部状態一式。
 pub struct Cpu {
-    pub a: uint8;
-    pub f: uint8;
-    pub b: uint8;
-    pub c: uint8;
-    pub d: uint8;
-    pub e: uint8;
-    pub h: uint8;
-    pub l: uint8;
+    pub af: RegPair;
+    pub bc: RegPair;
+    pub de: RegPair;
+    pub hl: RegPair;
     pub sp: uint16;
     pub pc: uint16;
     pub ime: bool;
@@ -31,53 +42,6 @@ pub struct Cpu {
     pub ldBbHit: bool;
 }
 
-// --- 16bit レジスタペアアクセス ---
-// F の下位 4bit は常に 0 にマスクする
-
-/// AF レジスタペアを読む。
-pub func CpuAf(cpu: *Cpu) -> uint16 {
-    return (cpu.a as uint16 << 8) | (cpu.f as uint16);
-}
-
-/// AF レジスタペアへ書く(F の下位4bitは常に0にマスクされる)。
-pub func CpuSetAf(cpu: *var Cpu, v: uint16) {
-    cpu.a = (v >> 8) as uint8;
-    cpu.f = (v as uint8) & 0xF0;
-}
-
-/// BC レジスタペアを読む。
-pub func CpuBc(cpu: *Cpu) -> uint16 {
-    return (cpu.b as uint16 << 8) | (cpu.c as uint16);
-}
-
-/// BC レジスタペアへ書く。
-pub func CpuSetBc(cpu: *var Cpu, v: uint16) {
-    cpu.b = (v >> 8) as uint8;
-    cpu.c = v as uint8;
-}
-
-/// DE レジスタペアを読む。
-pub func CpuDe(cpu: *Cpu) -> uint16 {
-    return (cpu.d as uint16 << 8) | (cpu.e as uint16);
-}
-
-/// DE レジスタペアへ書く。
-pub func CpuSetDe(cpu: *var Cpu, v: uint16) {
-    cpu.d = (v >> 8) as uint8;
-    cpu.e = v as uint8;
-}
-
-/// HL レジスタペアを読む。
-pub func CpuHl(cpu: *Cpu) -> uint16 {
-    return (cpu.h as uint16 << 8) | (cpu.l as uint16);
-}
-
-/// HL レジスタペアへ書く。
-pub func CpuSetHl(cpu: *var Cpu, v: uint16) {
-    cpu.h = (v >> 8) as uint8;
-    cpu.l = v as uint8;
-}
-
 // --- フラグ操作 ---
 
 /// Z/N/H/C の4フラグをまとめて設定する(F の下位4bitは0固定)。
@@ -87,42 +51,42 @@ pub func CpuSetFlags(cpu: *var Cpu, z: bool, n: bool, h: bool, c: bool) {
     if n { f = f | FlagN; }
     if h { f = f | FlagH; }
     if c { f = f | FlagC; }
-    cpu.f = f;
+    cpu.af.bytes.lo = f;
 }
 
 /// Zero フラグを読む。
 pub func CpuFlagZ(cpu: *Cpu) -> bool {
-    return (cpu.f & FlagZ) != 0;
+    return (cpu.af.bytes.lo & FlagZ) != 0;
 }
 
 /// Subtract フラグを読む。
 pub func CpuFlagN(cpu: *Cpu) -> bool {
-    return (cpu.f & FlagN) != 0;
+    return (cpu.af.bytes.lo & FlagN) != 0;
 }
 
 /// Half carry フラグを読む。
 pub func CpuFlagH(cpu: *Cpu) -> bool {
-    return (cpu.f & FlagH) != 0;
+    return (cpu.af.bytes.lo & FlagH) != 0;
 }
 
 /// Carry フラグを読む。
 pub func CpuFlagC(cpu: *Cpu) -> bool {
-    return (cpu.f & FlagC) != 0;
+    return (cpu.af.bytes.lo & FlagC) != 0;
 }
 
 /// ブート ROM 完了直後のレジスタ状態を直接セットする(実 BIOS を読み込まない
 /// 方針のため、DMG/CGB それぞれの post-boot 値を固定で書き込む)。
 pub func CpuReset(cpu: *var Cpu, mode: GbMode) {
     if mode == GbMode::Dmg {
-        CpuSetAf(cpu, 0x01B0);
-        CpuSetBc(cpu, 0x0013);
-        CpuSetDe(cpu, 0x00D8);
-        CpuSetHl(cpu, 0x014D);
+        cpu.af.word = 0x01B0 & 0xFFF0;
+        cpu.bc.word = 0x0013;
+        cpu.de.word = 0x00D8;
+        cpu.hl.word = 0x014D;
     } else {
-        CpuSetAf(cpu, 0x1180);
-        CpuSetBc(cpu, 0x0000);
-        CpuSetDe(cpu, 0xFF56);
-        CpuSetHl(cpu, 0x000D);
+        cpu.af.word = 0x1180 & 0xFFF0;
+        cpu.bc.word = 0x0000;
+        cpu.de.word = 0xFF56;
+        cpu.hl.word = 0x000D;
     }
     cpu.sp = 0xFFFE;
     cpu.pc = 0x0100;
@@ -162,43 +126,43 @@ func ReadImm16(cpu: *var Cpu, bus: *var Bus) -> uint16 {
 
 /// r8 インデックスからレジスタ(または (HL))の値を読む。
 func R8Get(cpu: *var Cpu, bus: *var Bus, idx: uint8) -> uint8 {
-    if idx == 0 { return cpu.b; }
-    else if idx == 1 { return cpu.c; }
-    else if idx == 2 { return cpu.d; }
-    else if idx == 3 { return cpu.e; }
-    else if idx == 4 { return cpu.h; }
-    else if idx == 5 { return cpu.l; }
-    else if idx == 6 { return CpuRead8(cpu, bus, CpuHl(cpu)); }
-    else { return cpu.a; }
+    if idx == 0 { return cpu.bc.bytes.hi; }
+    else if idx == 1 { return cpu.bc.bytes.lo; }
+    else if idx == 2 { return cpu.de.bytes.hi; }
+    else if idx == 3 { return cpu.de.bytes.lo; }
+    else if idx == 4 { return cpu.hl.bytes.hi; }
+    else if idx == 5 { return cpu.hl.bytes.lo; }
+    else if idx == 6 { return CpuRead8(cpu, bus, cpu.hl.word); }
+    else { return cpu.af.bytes.hi; }
 }
 
 /// r8 インデックスへレジスタ(または (HL))の値を書く。
 func R8Set(cpu: *var Cpu, bus: *var Bus, idx: uint8, v: uint8) {
-    if idx == 0 { cpu.b = v; }
-    else if idx == 1 { cpu.c = v; }
-    else if idx == 2 { cpu.d = v; }
-    else if idx == 3 { cpu.e = v; }
-    else if idx == 4 { cpu.h = v; }
-    else if idx == 5 { cpu.l = v; }
-    else if idx == 6 { CpuWrite8(cpu, bus, CpuHl(cpu), v); }
-    else { cpu.a = v; }
+    if idx == 0 { cpu.bc.bytes.hi = v; }
+    else if idx == 1 { cpu.bc.bytes.lo = v; }
+    else if idx == 2 { cpu.de.bytes.hi = v; }
+    else if idx == 3 { cpu.de.bytes.lo = v; }
+    else if idx == 4 { cpu.hl.bytes.hi = v; }
+    else if idx == 5 { cpu.hl.bytes.lo = v; }
+    else if idx == 6 { CpuWrite8(cpu, bus, cpu.hl.word, v); }
+    else { cpu.af.bytes.hi = v; }
 }
 
 // --- rp16 インデックス (0=BC,1=DE,2=HL,3=SP) ---
 
 /// rp16 インデックスから16bitレジスタペアを読む。
 func RpGet(cpu: *Cpu, idx: uint8) -> uint16 {
-    if idx == 0 { return CpuBc(cpu); }
-    else if idx == 1 { return CpuDe(cpu); }
-    else if idx == 2 { return CpuHl(cpu); }
+    if idx == 0 { return cpu.bc.word; }
+    else if idx == 1 { return cpu.de.word; }
+    else if idx == 2 { return cpu.hl.word; }
     else { return cpu.sp; }
 }
 
 /// rp16 インデックスへ16bitレジスタペアを書く。
 func RpSet(cpu: *var Cpu, idx: uint8, v: uint16) {
-    if idx == 0 { CpuSetBc(cpu, v); }
-    else if idx == 1 { CpuSetDe(cpu, v); }
-    else if idx == 2 { CpuSetHl(cpu, v); }
+    if idx == 0 { cpu.bc.word = v; }
+    else if idx == 1 { cpu.de.word = v; }
+    else if idx == 2 { cpu.hl.word = v; }
     else { cpu.sp = v; }
 }
 
@@ -206,14 +170,15 @@ func RpSet(cpu: *var Cpu, idx: uint8, v: uint16) {
 
 /// rp2 インデックス(PUSH/POP用)から16bitレジスタペアを読む。
 func Rp2Get(cpu: *Cpu, idx: uint8) -> uint16 {
-    if idx == 3 { return CpuAf(cpu); }
+    if idx == 3 { return cpu.af.word; }
     return RpGet(cpu, idx);
 }
 
 /// rp2 インデックス(PUSH/POP用)へ16bitレジスタペアを書く。
 func Rp2Set(cpu: *var Cpu, idx: uint8, v: uint16) {
     if idx == 3 {
-        CpuSetAf(cpu, v);
+        // F の下位4bitは常に0(POP AFでスタックの値をそのまま書かない)。
+        cpu.af.word = v & 0xFFF0;
         return;
     }
     RpSet(cpu, idx, v);
@@ -272,16 +237,16 @@ func SpAddOffset(cpu: *var Cpu, bus: *var Bus) -> uint16 {
 
 /// ADD/ADC A,v。
 func AluAdd(cpu: *var Cpu, v: uint8, carryIn: uint) {
-    let a = cpu.a as uint;
+    let a = cpu.af.bytes.hi as uint;
     let sum = a + (v as uint) + carryIn;
     let h = ((a & 0xF) + ((v as uint) & 0xF) + carryIn) > 0xF;
-    cpu.a = sum as uint8;
-    CpuSetFlags(cpu, cpu.a == 0, false, h, sum > 0xFF);
+    cpu.af.bytes.hi = sum as uint8;
+    CpuSetFlags(cpu, cpu.af.bytes.hi == 0, false, h, sum > 0xFF);
 }
 
 /// SUB/SBC/CP A,v。`store=false` のとき CP として結果をAへ書き戻さない。
 func AluSub(cpu: *var Cpu, v: uint8, carryIn: uint, store: bool) {
-    let a = cpu.a as uint;
+    let a = cpu.af.bytes.hi as uint;
     let subtrahend = (v as uint) + carryIn;
     let diff = (a + 0x100 - subtrahend) & 0xFF;
     let h = (a & 0xF) < (((v as uint) & 0xF) + carryIn);
@@ -289,26 +254,26 @@ func AluSub(cpu: *var Cpu, v: uint8, carryIn: uint, store: bool) {
     let result = diff as uint8;
     CpuSetFlags(cpu, result == 0, true, h, c);
     if store {
-        cpu.a = result;
+        cpu.af.bytes.hi = result;
     }
 }
 
 /// AND A,v。
 func AluAnd(cpu: *var Cpu, v: uint8) {
-    cpu.a = cpu.a & v;
-    CpuSetFlags(cpu, cpu.a == 0, false, true, false);
+    cpu.af.bytes.hi = cpu.af.bytes.hi & v;
+    CpuSetFlags(cpu, cpu.af.bytes.hi == 0, false, true, false);
 }
 
 /// OR A,v。
 func AluOr(cpu: *var Cpu, v: uint8) {
-    cpu.a = cpu.a | v;
-    CpuSetFlags(cpu, cpu.a == 0, false, false, false);
+    cpu.af.bytes.hi = cpu.af.bytes.hi | v;
+    CpuSetFlags(cpu, cpu.af.bytes.hi == 0, false, false, false);
 }
 
 /// XOR A,v。
 func AluXor(cpu: *var Cpu, v: uint8) {
-    cpu.a = cpu.a ^ v;
-    CpuSetFlags(cpu, cpu.a == 0, false, false, false);
+    cpu.af.bytes.hi = cpu.af.bytes.hi ^ v;
+    CpuSetFlags(cpu, cpu.af.bytes.hi == 0, false, false, false);
 }
 
 /// INC r8(Carryフラグは変化しない)。
@@ -335,21 +300,21 @@ func CpuDaa(cpu: *var Cpu) {
     var correction: uint8 = 0;
     var setC = c;
 
-    if h || (!n && (cpu.a & 0x0F) > 0x09) {
+    if h || (!n && (cpu.af.bytes.hi & 0x0F) > 0x09) {
         correction = correction | 0x06;
     }
-    if c || (!n && cpu.a > 0x99) {
+    if c || (!n && cpu.af.bytes.hi > 0x99) {
         correction = correction | 0x60;
         setC = true;
     }
 
     if n {
-        cpu.a -= correction;
+        cpu.af.bytes.hi -= correction;
     } else {
-        cpu.a += correction;
+        cpu.af.bytes.hi += correction;
     }
 
-    CpuSetFlags(cpu, cpu.a == 0, n, false, setC);
+    CpuSetFlags(cpu, cpu.af.bytes.hi == 0, n, false, setC);
 }
 
 /// IF & IE の下位5bit(受理待ちの割り込み種別ビット)を返す。
@@ -506,7 +471,7 @@ func CpuExecuteCb(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
     } else if group == 1 {
         let v = R8Get(cpu, bus, idx);
         let bit = (v & (1u8 << (op as uint))) != 0;
-        cpu.f = (cpu.f & FlagC) | FlagH | (bit ? 0u8 : FlagZ);
+        cpu.af.bytes.lo = (cpu.af.bytes.lo & FlagC) | FlagH | (bit ? 0u8 : FlagZ);
     } else if group == 2 {
         let v = R8Get(cpu, bus, idx);
         R8Set(cpu, bus, idx, v & ~(1u8 << (op as uint)));
@@ -580,43 +545,43 @@ pub func CpuExecute(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
         R8Set(cpu, bus, dst, v);
     } else if opcode == 0x36 {
         let v = ReadImm8(cpu, bus);
-        CpuWrite8(cpu, bus, CpuHl(cpu), v);
+        CpuWrite8(cpu, bus, cpu.hl.word, v);
     }
     // --- 16bit ロード ---
     else if opcode == 0x01 || opcode == 0x11 || opcode == 0x21 || opcode == 0x31 {
         let idx = (opcode >> 4) & 3;
         RpSet(cpu, idx, ReadImm16(cpu, bus));
     } else if opcode == 0x02 {
-        CpuWrite8(cpu, bus, CpuBc(cpu), cpu.a);
+        CpuWrite8(cpu, bus, cpu.bc.word, cpu.af.bytes.hi);
     } else if opcode == 0x12 {
-        CpuWrite8(cpu, bus, CpuDe(cpu), cpu.a);
+        CpuWrite8(cpu, bus, cpu.de.word, cpu.af.bytes.hi);
     } else if opcode == 0x22 {
-        let hl = CpuHl(cpu);
-        CpuWrite8(cpu, bus, hl, cpu.a);
-        CpuSetHl(cpu, hl + 1);
+        let hl = cpu.hl.word;
+        CpuWrite8(cpu, bus, hl, cpu.af.bytes.hi);
+        cpu.hl.word = hl + 1;
     } else if opcode == 0x32 {
-        let hl = CpuHl(cpu);
-        CpuWrite8(cpu, bus, hl, cpu.a);
-        CpuSetHl(cpu, hl - 1);
+        let hl = cpu.hl.word;
+        CpuWrite8(cpu, bus, hl, cpu.af.bytes.hi);
+        cpu.hl.word = hl - 1;
     } else if opcode == 0x0A {
-        cpu.a = CpuRead8(cpu, bus, CpuBc(cpu));
+        cpu.af.bytes.hi = CpuRead8(cpu, bus, cpu.bc.word);
     } else if opcode == 0x1A {
-        cpu.a = CpuRead8(cpu, bus, CpuDe(cpu));
+        cpu.af.bytes.hi = CpuRead8(cpu, bus, cpu.de.word);
     } else if opcode == 0x2A {
-        let hl = CpuHl(cpu);
-        cpu.a = CpuRead8(cpu, bus, hl);
-        CpuSetHl(cpu, hl + 1);
+        let hl = cpu.hl.word;
+        cpu.af.bytes.hi = CpuRead8(cpu, bus, hl);
+        cpu.hl.word = hl + 1;
     } else if opcode == 0x3A {
-        let hl = CpuHl(cpu);
-        cpu.a = CpuRead8(cpu, bus, hl);
-        CpuSetHl(cpu, hl - 1);
+        let hl = cpu.hl.word;
+        cpu.af.bytes.hi = CpuRead8(cpu, bus, hl);
+        cpu.hl.word = hl - 1;
     } else if opcode == 0x08 {
         let addr = ReadImm16(cpu, bus);
         CpuWrite8(cpu, bus, addr, cpu.sp as uint8);
         CpuWrite8(cpu, bus, addr + 1, (cpu.sp >> 8) as uint8);
     } else if opcode == 0xF9 {
         BusTick(bus, 4); // internal
-        cpu.sp = CpuHl(cpu);
+        cpu.sp = cpu.hl.word;
     }
     // --- 16bit INC/DEC (フラグ無影響、内部+4サイクル) ---
     else if opcode == 0x03 || opcode == 0x13 || opcode == 0x23 || opcode == 0x33 {
@@ -631,12 +596,12 @@ pub func CpuExecute(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
     // --- ADD HL,rr ---
     else if opcode == 0x09 || opcode == 0x19 || opcode == 0x29 || opcode == 0x39 {
         let idx = (opcode >> 4) & 3;
-        let hl = CpuHl(cpu) as uint;
+        let hl = cpu.hl.word as uint;
         let v = RpGet(cpu, idx) as uint;
         let sum = hl + v;
         let h = ((hl & 0xFFF) + (v & 0xFFF)) > 0xFFF;
         CpuSetFlags(cpu, CpuFlagZ(cpu), false, h, sum > 0xFFFF);
-        CpuSetHl(cpu, sum as uint16);
+        cpu.hl.word = sum as uint16;
         BusTick(bus, 4);
     }
     // --- ADD SP,e8 / LD HL,SP+e8 ---
@@ -648,7 +613,7 @@ pub func CpuExecute(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
     } else if opcode == 0xF8 {
         let result = SpAddOffset(cpu, bus);
         BusTick(bus, 4);
-        CpuSetHl(cpu, result);
+        cpu.hl.word = result;
     }
     // --- PUSH/POP ---
     else if opcode == 0xC1 || opcode == 0xD1 || opcode == 0xE1 || opcode == 0xF1 {
@@ -688,7 +653,7 @@ pub func CpuExecute(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
         cpu.pc = addr;
         BusTick(bus, 4);
     } else if opcode == 0xE9 {
-        cpu.pc = CpuHl(cpu);
+        cpu.pc = cpu.hl.word;
     }
     // --- CALL ---
     else if opcode == 0xC4 || opcode == 0xD4 || opcode == 0xCC || opcode == 0xDC {
@@ -716,20 +681,20 @@ pub func CpuExecute(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
     // --- LDH / (C) / (a16) ---
     else if opcode == 0xE0 {
         let addr = 0xFF00u16 + ReadImm8(cpu, bus) as uint16;
-        CpuWrite8(cpu, bus, addr, cpu.a);
+        CpuWrite8(cpu, bus, addr, cpu.af.bytes.hi);
     } else if opcode == 0xF0 {
         let addr = 0xFF00u16 + ReadImm8(cpu, bus) as uint16;
-        cpu.a = CpuRead8(cpu, bus, addr);
+        cpu.af.bytes.hi = CpuRead8(cpu, bus, addr);
     } else if opcode == 0xE2 {
-        CpuWrite8(cpu, bus, 0xFF00u16 + cpu.c as uint16, cpu.a);
+        CpuWrite8(cpu, bus, 0xFF00u16 + cpu.bc.bytes.lo as uint16, cpu.af.bytes.hi);
     } else if opcode == 0xF2 {
-        cpu.a = CpuRead8(cpu, bus, 0xFF00u16 + cpu.c as uint16);
+        cpu.af.bytes.hi = CpuRead8(cpu, bus, 0xFF00u16 + cpu.bc.bytes.lo as uint16);
     } else if opcode == 0xEA {
         let addr = ReadImm16(cpu, bus);
-        CpuWrite8(cpu, bus, addr, cpu.a);
+        CpuWrite8(cpu, bus, addr, cpu.af.bytes.hi);
     } else if opcode == 0xFA {
         let addr = ReadImm16(cpu, bus);
-        cpu.a = CpuRead8(cpu, bus, addr);
+        cpu.af.bytes.hi = CpuRead8(cpu, bus, addr);
     }
     // --- CB Prefix ---
     else if opcode == 0xCB {
@@ -767,29 +732,29 @@ pub func CpuExecute(cpu: *var Cpu, bus: *var Bus, opcode: uint8) {
     }
     // --- アキュムレータ回転 (非CB版は常に Z=0) ---
     else if opcode == 0x07 { // RLCA
-        cpu.a = CbRotateShift(cpu, 0, cpu.a);
-        cpu.f = cpu.f & ~FlagZ;
+        cpu.af.bytes.hi = CbRotateShift(cpu, 0, cpu.af.bytes.hi);
+        cpu.af.bytes.lo = cpu.af.bytes.lo & ~FlagZ;
     } else if opcode == 0x0F { // RRCA
-        cpu.a = CbRotateShift(cpu, 1, cpu.a);
-        cpu.f = cpu.f & ~FlagZ;
+        cpu.af.bytes.hi = CbRotateShift(cpu, 1, cpu.af.bytes.hi);
+        cpu.af.bytes.lo = cpu.af.bytes.lo & ~FlagZ;
     } else if opcode == 0x17 { // RLA
-        cpu.a = CbRotateShift(cpu, 2, cpu.a);
-        cpu.f = cpu.f & ~FlagZ;
+        cpu.af.bytes.hi = CbRotateShift(cpu, 2, cpu.af.bytes.hi);
+        cpu.af.bytes.lo = cpu.af.bytes.lo & ~FlagZ;
     } else if opcode == 0x1F { // RRA
-        cpu.a = CbRotateShift(cpu, 3, cpu.a);
-        cpu.f = cpu.f & ~FlagZ;
+        cpu.af.bytes.hi = CbRotateShift(cpu, 3, cpu.af.bytes.hi);
+        cpu.af.bytes.lo = cpu.af.bytes.lo & ~FlagZ;
     }
     // --- DAA・フラグ操作系 ---
     else if opcode == 0x27 {
         CpuDaa(cpu);
     } else if opcode == 0x2F { // CPL
-        cpu.a = ~cpu.a;
-        cpu.f = (cpu.f & (FlagZ | FlagC)) | FlagN | FlagH;
+        cpu.af.bytes.hi = ~cpu.af.bytes.hi;
+        cpu.af.bytes.lo = (cpu.af.bytes.lo & (FlagZ | FlagC)) | FlagN | FlagH;
     } else if opcode == 0x37 { // SCF
-        cpu.f = (cpu.f & FlagZ) | FlagC;
+        cpu.af.bytes.lo = (cpu.af.bytes.lo & FlagZ) | FlagC;
     } else if opcode == 0x3F { // CCF
         let newC = CpuFlagC(cpu) ? 0u8 : FlagC;
-        cpu.f = (cpu.f & FlagZ) | newC;
+        cpu.af.bytes.lo = (cpu.af.bytes.lo & FlagZ) | newC;
     }
     // --- 未定義オペコード ---
     else if opcode == 0xD3 || opcode == 0xDB || opcode == 0xDD || opcode == 0xE3 ||

@@ -66,13 +66,13 @@ func Main() -> int {
 
     // Test 1: LD A, d8 (0x3E)
     let cycles1 = CpuStep(@cpu, @bus);
-    if cpu.a != 0x77 { return 1; }
+    if cpu.af.bytes.hi != 0x77 { return 1; }
     if cpu.pc != 0x0102 { return 2; }
     if cycles1 != 8 { return 3; }
 
     // Test 2: ADD A, d8 (0xC6) with carry & half-carry
     let cycles2 = CpuStep(@cpu, @bus);
-    if cpu.a != 0x80 { return 4; } // 0x77 + 0x09 = 0x80
+    if cpu.af.bytes.hi != 0x80 { return 4; } // 0x77 + 0x09 = 0x80
     if !CpuFlagH(@cpu) { return 5; }
     if CpuFlagC(@cpu) { return 6; }
     if cycles2 != 8 { return 7; }
@@ -81,24 +81,24 @@ func Main() -> int {
     // 0x15 + 0x27 = 0x3C -> DAA -> 0x42
     CpuStep(@cpu, @bus); // LD A, 0x15
     CpuStep(@cpu, @bus); // ADD A, 0x27
-    if cpu.a != 0x3C { return 8; }
+    if cpu.af.bytes.hi != 0x3C { return 8; }
     CpuStep(@cpu, @bus); // DAA
-    if cpu.a != 0x42 { return 9; }
+    if cpu.af.bytes.hi != 0x42 { return 9; }
 
     // Test 4: CB Prefix - SWAP A (0xCB 0x37)
     // 0x42 SWAP -> 0x24
     let cycles4 = CpuStep(@cpu, @bus);
-    if cpu.a != 0x24 { return 10; }
+    if cpu.af.bytes.hi != 0x24 { return 10; }
     if cycles4 != 8 { return 11; }
 
     // Test 5: PUSH BC / POP DE
-    cpu.b = 0x12;
-    cpu.c = 0x34;
+    cpu.bc.bytes.hi = 0x12;
+    cpu.bc.bytes.lo = 0x34;
     let pushCycles = CpuStep(@cpu, @bus); // PUSH BC
     if pushCycles != 16 { return 12; }
     let popCycles = CpuStep(@cpu, @bus); // POP DE
     if popCycles != 12 { return 13; }
-    if cpu.d != 0x12 || cpu.e != 0x34 { return 14; }
+    if cpu.de.bytes.hi != 0x12 || cpu.de.bytes.lo != 0x34 { return 14; }
 
     // Test 6: JR Z, e8 (conditional taken vs not taken)
     // Z is false currently

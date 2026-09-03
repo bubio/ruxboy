@@ -1,6 +1,5 @@
 import GbCore::{
     Cpu, GbMode,
-    CpuAf, CpuSetAf, CpuBc, CpuSetBc, CpuDe, CpuSetDe, CpuHl, CpuSetHl,
     CpuSetFlags, CpuFlagZ, CpuFlagN, CpuFlagH, CpuFlagC,
     CpuReset
 };
@@ -9,28 +8,28 @@ func Main() -> int {
     var cpu: Cpu;
 
     // Test 1: Register pair AF (F lower 4 bits masked)
-    CpuSetAf(@cpu, 0x1234);
-    if cpu.a != 0x12 { return 1; }
-    if cpu.f != 0x30 { return 2; }
-    if CpuAf(@cpu) != 0x1230 { return 3; }
+    cpu.af.word = 0x1234 & 0xFFF0;
+    if cpu.af.bytes.hi != 0x12 { return 1; }
+    if cpu.af.bytes.lo != 0x30 { return 2; }
+    if cpu.af.word != 0x1230 { return 3; }
 
     // Test 2: Register pair BC
-    CpuSetBc(@cpu, 0xABCD);
-    if cpu.b != 0xAB { return 4; }
-    if cpu.c != 0xCD { return 5; }
-    if CpuBc(@cpu) != 0xABCD { return 6; }
+    cpu.bc.word = 0xABCD;
+    if cpu.bc.bytes.hi != 0xAB { return 4; }
+    if cpu.bc.bytes.lo != 0xCD { return 5; }
+    if cpu.bc.word != 0xABCD { return 6; }
 
     // Test 3: Register pair DE
-    CpuSetDe(@cpu, 0x5678);
-    if cpu.d != 0x56 { return 7; }
-    if cpu.e != 0x78 { return 8; }
-    if CpuDe(@cpu) != 0x5678 { return 9; }
+    cpu.de.word = 0x5678;
+    if cpu.de.bytes.hi != 0x56 { return 7; }
+    if cpu.de.bytes.lo != 0x78 { return 8; }
+    if cpu.de.word != 0x5678 { return 9; }
 
     // Test 4: Register pair HL
-    CpuSetHl(@cpu, 0x9ABC);
-    if cpu.h != 0x9A { return 10; }
-    if cpu.l != 0xBC { return 11; }
-    if CpuHl(@cpu) != 0x9ABC { return 12; }
+    cpu.hl.word = 0x9ABC;
+    if cpu.hl.bytes.hi != 0x9A { return 10; }
+    if cpu.hl.bytes.lo != 0xBC { return 11; }
+    if cpu.hl.word != 0x9ABC { return 12; }
 
     // Test 5: Flags
     CpuSetFlags(@cpu, true, false, true, false);
@@ -47,19 +46,19 @@ func Main() -> int {
 
     // Test 6: Reset DMG
     CpuReset(@cpu, GbMode::Dmg);
-    if CpuAf(@cpu) != 0x01B0 { return 21; }
-    if CpuBc(@cpu) != 0x0013 { return 22; }
-    if CpuDe(@cpu) != 0x00D8 { return 23; }
-    if CpuHl(@cpu) != 0x014D { return 24; }
+    if cpu.af.word != 0x01B0 { return 21; }
+    if cpu.bc.word != 0x0013 { return 22; }
+    if cpu.de.word != 0x00D8 { return 23; }
+    if cpu.hl.word != 0x014D { return 24; }
     if cpu.sp != 0xFFFE { return 25; }
     if cpu.pc != 0x0100 { return 26; }
 
     // Test 7: Reset CGB
     CpuReset(@cpu, GbMode::Cgb);
-    if CpuAf(@cpu) != 0x1180 { return 27; }
-    if CpuBc(@cpu) != 0x0000 { return 28; }
-    if CpuDe(@cpu) != 0xFF56 { return 29; }
-    if CpuHl(@cpu) != 0x000D { return 30; }
+    if cpu.af.word != 0x1180 { return 27; }
+    if cpu.bc.word != 0x0000 { return 28; }
+    if cpu.de.word != 0xFF56 { return 29; }
+    if cpu.hl.word != 0x000D { return 30; }
     if cpu.sp != 0xFFFE { return 31; }
     if cpu.pc != 0x0100 { return 32; }
 

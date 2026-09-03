@@ -3,7 +3,9 @@
 Instruments によるプロファイリングをきっかけに行った、CPU/PPU 周りの速度調査の
 記録。**結論としては「Rux コンパイラの最適化パイプラインが未成熟であること」が
 根本原因であり、コンパイラ側の改善を待つほうが筋が良いと判断し、これ以上の
-ソースコード側の対策は現時点で行わない**（詳細は末尾「今後の方針」）。
+ソースコード側の対策は現時点で行わない**（詳細は末尾「今後の方針」）。ただし
+6章のレジスタペアunion化は、この方針の例外として言語制約内で実施した
+軽微な対策。
 
 ## 背景
 
@@ -233,3 +235,71 @@ Liteを試したところ、**CPU使用率30%程度で問題なく動作した**
 生成)に起因することの裏付けがさらに強まった。上記のmacOSでの比較
 (同一ロジックのBubiBoy Liteが約30%、RuxBoyがほぼ100%)と合わせて、
 結論(1章で述べたRux Releaseパイプラインの未成熟さ)は変わらない。
+
+## 6. SameBoy(移植元と同じロジックのC実装)との設計比較、レジスタペアのunion化(2026-09-03)
+
+5章の裏付けを受け、移植元の移植元にあたる**SameBoy**(`Core/sm83_cpu.c`、
+高速な実装で知られるC言語製GBCエミュレーター)のCPU実装とRuxBoyの
+`Cpu.rux`を比較し、言語制約内で真似できる設計上の相違点を探した。
+
+### 見つかった相違点
+
+1. **opcodeディスパッチ**: SameBoyは関数ポインタのジャンプテーブル
+   (`sm83_cpu.c:1570-1605, 1715`)。RuxBoyは3章で述べた通り関数ポインタも
+   整数`match`も言語に無いため、この差は埋められない。
+2. **レジスタ表現**: SameBoyは16bit/8bitレジスタを`union`でメモリ
+   オーバーレイしており(`gb.h:71, 315-370`)、シフト/マスク命令が不要。
+   RuxBoyは`a`〜`l`を独立フィールドとして持ち、16bitペアの取得・設定の
+   たびに関数呼び出し+シフト+マスクが発生していた(`CpuAf`等、
+   `CpuExecute`内で44箇所呼ばれる)。Releaseがインライン化しないため、
+   このオーバーヘッドはBus呼び出し連鎖(2章)と同種の、もう一つの具体的な
+   発生源だった。
+
+Ruxが`union`(明示的なオーバーラップストレージ型、
+`external/Rux/Docs/Language.md`110-112行)をサポートしていることを確認し、
+`Tests/Language/Union`の実例(`int32`/`float32`/`uint8[4]`の重ね合わせ)に
+倣った最小プローブで「構造体フィールドの宣言順=メモリオフセット昇順、
+リトルエンディアン」をDebug/Release両方の実行で確認した上で、`Cpu`構造体を
+以下の形へ書き換えた:
+
+```rux
+pub struct RegPairBytes {
+    pub lo: uint8;
+    pub hi: uint8;
+}
+
+pub union RegPair {
+    pub word: uint16,
+    pub bytes: RegPairBytes
+}
+
+pub struct Cpu {
+    pub af: RegPair;
+    pub bc: RegPair;
+    pub de: RegPair;
+    pub hl: RegPair;
+    // ...
+}
+```
+
+`CpuAf`/`CpuSetAf`/`CpuBc`/`CpuSetBc`/`CpuDe`/`CpuSetDe`/`CpuHl`/`CpuSetHl`
+の8関数は全廃し、呼び出し側を`cpu.af.word`等の直接アクセスへ置き換えた
+(AF書き込み時のFレジスタ下位4bitマスクは書き込み箇所に残した)。8bit単体
+アクセス(`cpu.a`→`cpu.af.bytes.hi`等、命令の大半を占めるLD r,r'/ALU系が使う)
+は固定オフセットへの単純load/storeのままで追加コストなし。
+
+### 検証
+
+- `rux check`(`Packages/Core`)通過
+- Cpu/CpuInstrs/Mooneye(既知3件のEXPECTED FAILのみ)/Mbc/Blargg/DmgSound/
+  Acid2(dmg-acid2・cgb-acid2フレームバッファハッシュ一致)/SaveState、
+  全ユニットテスト・統合テストPASS(退行なし)
+- CpuPerfベンチ: 226%→**235%** realtime(このベンチ自体はNOP/JPループで
+  レジスタペア操作が少なく、恩恵は小さいが退行はない)
+
+### 結論
+
+Bus呼び出し連鎖(2章)ほど大きな効果ではないが、言語制約の範囲内で適用できる
+実効性のある対策だったため採用した。**それ以外(ジャンプテーブル化、
+関数インライン化)は依然としてコンパイラ側の制約であり、5章までの
+「コンパイラの改善待ち」という基本方針は変わらない。**

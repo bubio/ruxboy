@@ -202,14 +202,14 @@ func RomHeaderChecksum(rom: Slice<uint8>) -> uint16 {
 // --- 書き込み ---
 
 func WriteCpuState(c: *var WriteCursor, cpu: *Cpu) {
-    PutU8(c, cpu.a);
-    PutU8(c, cpu.f);
-    PutU8(c, cpu.b);
-    PutU8(c, cpu.c);
-    PutU8(c, cpu.d);
-    PutU8(c, cpu.e);
-    PutU8(c, cpu.h);
-    PutU8(c, cpu.l);
+    PutU8(c, cpu.af.bytes.hi);
+    PutU8(c, cpu.af.bytes.lo);
+    PutU8(c, cpu.bc.bytes.hi);
+    PutU8(c, cpu.bc.bytes.lo);
+    PutU8(c, cpu.de.bytes.hi);
+    PutU8(c, cpu.de.bytes.lo);
+    PutU8(c, cpu.hl.bytes.hi);
+    PutU8(c, cpu.hl.bytes.lo);
     PutU16(c, cpu.sp);
     PutU16(c, cpu.pc);
     PutBool(c, cpu.ime);
@@ -221,14 +221,14 @@ func WriteCpuState(c: *var WriteCursor, cpu: *Cpu) {
 }
 
 func ReadCpuState(c: *var ReadCursor, cpu: *var Cpu) {
-    cpu.a = GetU8(c);
-    cpu.f = GetU8(c);
-    cpu.b = GetU8(c);
-    cpu.c = GetU8(c);
-    cpu.d = GetU8(c);
-    cpu.e = GetU8(c);
-    cpu.h = GetU8(c);
-    cpu.l = GetU8(c);
+    cpu.af.bytes.hi = GetU8(c);
+    cpu.af.bytes.lo = GetU8(c);
+    cpu.bc.bytes.hi = GetU8(c);
+    cpu.bc.bytes.lo = GetU8(c);
+    cpu.de.bytes.hi = GetU8(c);
+    cpu.de.bytes.lo = GetU8(c);
+    cpu.hl.bytes.hi = GetU8(c);
+    cpu.hl.bytes.lo = GetU8(c);
     cpu.sp = GetU16(c);
     cpu.pc = GetU16(c);
     cpu.ime = GetBool(c);

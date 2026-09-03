@@ -120,7 +120,7 @@ func RunMooneyeRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool, f
     while bus.cycles < timeout {
         CpuStep(@cpu, @bus);
         if cpu.ldBbHit {
-            if cpu.b == 3 && cpu.c == 5 && cpu.d == 8 && cpu.e == 13 && cpu.h == 21 && cpu.l == 34 {
+            if cpu.bc.bytes.hi == 3 && cpu.bc.bytes.lo == 5 && cpu.de.bytes.hi == 8 && cpu.de.bytes.lo == 13 && cpu.hl.bytes.hi == 21 && cpu.hl.bytes.lo == 34 {
                 if !expectedPass {
                     Print("UNEXPECTED PASS (remove from expected failure list): ");
                     PrintLine(name);
@@ -140,17 +140,17 @@ func RunMooneyeRom(path: Slice<char8>, name: Slice<char8>, expectedPass: bool, f
             Print("FAIL: ");
             Print(name);
             Print(" (B=");
-            PrintHex(cpu.b);
+            PrintHex(cpu.bc.bytes.hi);
             Print(" C=");
-            PrintHex(cpu.c);
+            PrintHex(cpu.bc.bytes.lo);
             Print(" D=");
-            PrintHex(cpu.d);
+            PrintHex(cpu.de.bytes.hi);
             Print(" E=");
-            PrintHex(cpu.e);
+            PrintHex(cpu.de.bytes.lo);
             Print(" H=");
-            PrintHex(cpu.h);
+            PrintHex(cpu.hl.bytes.hi);
             Print(" L=");
-            PrintHex(cpu.l);
+            PrintHex(cpu.hl.bytes.lo);
             Print(" TIMA=");
             PrintHex(bus.tima);
             Print(" DIV=");
