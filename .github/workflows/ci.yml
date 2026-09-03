@@ -8,6 +8,7 @@ on:
       - "spikes/**"
       - "**/*.md"
       - ".gitignore"
+      - "LICENSE"
   pull_request:
     branches: [main]
     paths-ignore:
@@ -15,6 +16,7 @@ on:
       - "spikes/**"
       - "**/*.md"
       - ".gitignore"
+      - "LICENSE"
 
 jobs:
   build-macos:
