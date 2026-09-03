@@ -1,0 +1,12 @@
+/// RuxBoy のバージョン番号の唯一の源。`scripts/get_version.sh` がこの定数を
+/// 抽出してリリース zip のファイル名を作る(BubiBoy Lite の `version.odin` を踏襲)。
+/// リリース手順: この値をセマンティックバージョニングで更新してコミットし、
+/// GitHub Release を作成する(タグ名との一致は必須としない、`docs/dev/phases/
+/// phase-10-release.md` 参照)。
+/// `Packages/App/Rux.toml` の `[Package] Version` は別管理(rux build の表示に
+/// のみ使われる)なので、この値を更新するときは同じ値へ手で合わせること。
+/// 不一致は `get_version.sh` が検出してエラーにする。
+
+import Core::Slice;
+
+pub const AppVersion: Slice<char8> = "0.1.0";

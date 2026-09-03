@@ -147,41 +147,9 @@ jobs:
           path: external/Rux/Bin
           key: rux-compiler-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('external/Rux/**/*.cpp', 'external/Rux/**/*.h', 'external/Rux/Run.ps1') }}
 
-      # ランナー既定のClangは22.1未満のため、external/RuxのRun.ps1が要求するバージョンを
-      # インストーラ無し(管理者権限不要)のtar.xzアーカイブから取得する
-      # (docs/dev/PLAN.md フェーズ9、ローカル検証で同じ方式を確認済み)。
-      - name: Fetch LLVM 22
+      - name: Build Rux compiler (Windows)
         if: steps.cache-rux.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz"
-          Invoke-WebRequest -Uri $url -OutFile llvm.tar.xz
-          New-Item -ItemType Directory -Force -Path llvm22 | Out-Null
-          tar -xJf llvm.tar.xz -C llvm22 --strip-components=1
-          Remove-Item llvm.tar.xz
-
-      - name: Build Rux compiler
-        if: steps.cache-rux.outputs.cache-hit != 'true'
-        shell: pwsh
-        working-directory: external/Rux
-        run: |
-          ./.github/scripts/Enter-VsDevEnv.ps1 -Arch amd64
-          # windows-latestランナーはcmake.exe/ninja.exeがPATH上に複数存在しうる
-          # (VS同梱分とランナー既定分など、場所はイメージ更新で変わりうる)。Run.ps1の
-          # Find-ToolはGet-Command(-All無し)を使うため複数あると配列が返り、
-          # Invoke-Checked -FilePathが[string]型変換エラーで失敗する
-          # (ローカル実機でも踏んだ問題、docs/dev/phases/phase-09-cicd.md 5.1参照)。
-          # 特定パスを決め打ちで除外するのではなく、実際に重複しているツールだけ
-          # 2件目以降のディレクトリをPATHから除外する(1件目=最優先のものは残す)。
-          foreach ($toolName in @("cmake", "ninja")) {
-              $matches = Get-Command $toolName -CommandType Application -All -ErrorAction SilentlyContinue
-              if ($matches.Count -gt 1) {
-                  $dupDirs = $matches | Select-Object -Skip 1 | ForEach-Object { Split-Path $_.Source -Parent }
-                  Write-Host "重複した $toolName を検出、除外するディレクトリ: $($dupDirs -join ', ')"
-                  $env:Path = ($env:Path -split ';' | Where-Object { $dupDirs -notcontains $_ }) -join ';'
-              }
-          }
-          ./Run.ps1 build -Compiler "$env:GITHUB_WORKSPACE/llvm22/bin/clang++.exe"
+        uses: ./.github/actions/build-rux-windows
 
       - name: Fetch Test ROMs
         shell: bash

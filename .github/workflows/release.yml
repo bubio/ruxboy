@@ -1,0 +1,228 @@
+name: Release
+
+# GitHub Release の作成(published)をトリガーに全プラットフォームの Release
+# ビルドを作り、scripts/package_zip.sh で zip 化して Release へ添付する
+# (BubiBoy Lite の publish-release-assets.yml パターンを踏襲。
+# docs/dev/phases/phase-10-release.md 参照)。
+#
+# バージョン番号(Packages/App/Src/Version.rux の AppVersion)と Release の
+# タグ名の一致は要求しない(BubiBoy Lite と同じ設計。zip ファイル名は
+# タグ名ではなく AppVersion から生成される)。
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    name: Build (macOS)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runs-on: macos-26
+          - arch: x86_64
+            runs-on: macos-26-intel
+    runs-on: ${{ matrix.runs-on }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Checkout external/Rux submodule
+        run: git submodule update --init --depth 1 external/Rux
+
+      - name: Install dependencies
+        run: brew install llvm@22 cmake ninja sdl3
+
+      - name: Cache Rux compiler
+        uses: actions/cache@v4
+        id: cache-rux
+        with:
+          path: external/Rux/Bin
+          key: rux-compiler-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('external/Rux/**/*.cpp', 'external/Rux/**/*.h', 'external/Rux/Run.sh') }}
+
+      - name: Build Rux compiler
+        if: steps.cache-rux.outputs.cache-hit != 'true'
+        working-directory: external/Rux
+        run: sh Run.sh build --compiler "$(brew --prefix llvm@22)/bin/clang++"
+
+      - name: Build RuxBoy (Release)
+        run: sh scripts/build_macos.sh --release
+
+      - name: Version smoke test
+        run: |
+          case "${{ matrix.arch }}" in
+            arm64)   archdir=AArch64 ;;
+            x86_64)  archdir=x86-64 ;;
+          esac
+          Packages/App/Bin/Release/macOS/$archdir/RuxBoy -v
+
+      - name: Stage artifact
+        run: |
+          case "${{ matrix.arch }}" in
+            arm64)   archdir=AArch64 ;;
+            x86_64)  archdir=x86-64 ;;
+          esac
+          mkdir -p stage
+          cp Packages/App/Bin/Release/macOS/$archdir/RuxBoy stage/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raw-macos-${{ matrix.arch }}
+          path: stage
+          if-no-files-found: error
+
+  build-linux:
+    name: Build (Linux)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            arch: amd64
+            archdir: x86-64
+          - runner: ubuntu-26.04-arm
+            arch: arm64
+            archdir: AArch64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Checkout external/Rux submodule
+        run: git submodule update --init --depth 1 external/Rux
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsdl3-dev
+
+      - name: Cache Rux compiler
+        uses: actions/cache@v4
+        id: cache-rux
+        with:
+          path: external/Rux/Bin
+          key: rux-compiler-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('external/Rux/**/*.cpp', 'external/Rux/**/*.h', 'external/Rux/Run.sh') }}
+
+      - name: Build Rux compiler
+        if: steps.cache-rux.outputs.cache-hit != 'true'
+        working-directory: external/Rux
+        run: sh Run.sh build --compiler /usr/bin/clang++-22
+
+      - name: Build RuxBoy (Release)
+        run: sh scripts/build_linux.sh --release
+
+      - name: Version smoke test
+        run: Packages/App/Bin/Release/Linux/${{ matrix.archdir }}/RuxBoy -v
+
+      - name: Stage artifact
+        run: |
+          mkdir -p stage
+          cp Packages/App/Bin/Release/Linux/${{ matrix.archdir }}/RuxBoy stage/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raw-linux-${{ matrix.arch }}
+          path: stage
+          if-no-files-found: error
+
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Checkout external/Rux submodule
+        shell: bash
+        run: git submodule update --init --depth 1 external/Rux
+
+      - name: Cache Rux compiler
+        uses: actions/cache@v4
+        id: cache-rux
+        with:
+          path: external/Rux/Bin
+          key: rux-compiler-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('external/Rux/**/*.cpp', 'external/Rux/**/*.h', 'external/Rux/Run.ps1') }}
+
+      - name: Build Rux compiler (Windows)
+        if: steps.cache-rux.outputs.cache-hit != 'true'
+        uses: ./.github/actions/build-rux-windows
+
+      - name: Fetch SDL3 runtime
+        shell: bash
+        run: sh scripts/fetch_sdl3_windows.sh
+
+      - name: Build RuxBoy (Release)
+        shell: bash
+        run: sh scripts/build_windows.sh --release
+
+      - name: Version smoke test
+        shell: bash
+        run: Packages/App/Bin/Release/Windows/x86-64/RuxBoy.exe -v
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp Packages/App/Bin/Release/Windows/x86-64/RuxBoy.exe stage/
+          cp Packages/App/Bin/Release/Windows/x86-64/SDL3.dll stage/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raw-windows-x64
+          path: stage
+          if-no-files-found: error
+
+  publish:
+    name: Package and upload release zips
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Package and upload release zips
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "Error: RELEASE_TAG が空です(release イベント以外から呼ばれた?)" >&2
+            exit 1
+          fi
+
+          # artifact 名は build-*.yml の規約で raw-<platform>-<arch>
+          # (例: raw-macos-arm64、raw-windows-x64)。
+          for dir in release-assets/raw-*; do
+            name="$(basename "$dir")"
+            rest="${name#raw-}"
+            platform="${rest%-*}"
+            arch="${rest##*-}"
+            sh scripts/package_zip.sh "$dir" "$platform" "$arch"
+          done
+
+          shopt -s nullglob
+          zips=(RuxBoy-*.zip)
+          if [ "${#zips[@]}" -eq 0 ]; then
+            echo "Error: 生成された zip がありません。" >&2
+            exit 1
+          fi
+
+          gh release upload "$RELEASE_TAG" "${zips[@]}" --clobber

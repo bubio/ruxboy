@@ -49,7 +49,8 @@ func Main() -> int {
         return 0;
     }
     if opts.showVersion {
-        PrintLine("RuxBoy 0.1.0");
+        Print("RuxBoy ");
+        PrintLine(AppVersion);
         return 0;
     }
     if !opts.ok {

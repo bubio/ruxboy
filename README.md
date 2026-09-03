@@ -8,7 +8,21 @@ Game Boy Color エミュレーター。[Rux 言語](https://rux-lang.dev/) で�
 
 - macOS 13.5+ (Intel / Apple Silicon)
 - Ubuntu 26.04+ (amd64 / arm64)
-- Windows (準備中)
+- Windows 11+ (x64)
+
+## インストール
+
+[Releases](../../releases) から対応する zip をダウンロードして展開してください。
+
+- **macOS / Linux**: 実行には SDL3 のランタイムが別途必要です。
+  macOS は `brew install sdl3`、Ubuntu 26.04+ は `sudo apt-get install libsdl3-0`
+  で導入できます(開発用の `-dev` パッケージは不要です)。
+- **Windows**: zip に `SDL3.dll` が同梱されているため追加の準備は不要です。
+  `RuxBoy.exe` と同じフォルダに置いたまま実行してください。
+- **macOS**: 未署名バイナリのため、初回実行時に Gatekeeper が開発元を確認できない
+  旨の警告を出すことがあります。その場合は `xattr -d com.apple.quarantine
+  ./RuxBoy` を実行するか、Finder でバイナリを右クリックして **開く** を選んで
+  ください。
 
 ## ビルド
 
@@ -35,7 +49,22 @@ sudo apt-get install clang-22 cmake ninja-build libsdl3-dev
 sh scripts/build_linux.sh --release
 ```
 
-ビルド成果物は `Packages/App/Bin/Release/<OS>/<Arch>/RuxBoy` に生成されます。
+### Windows
+
+Visual Studio(Desktop development with C++)と LLVM 22 が必要です。ビルドは
+Visual Studio の開発者環境(`vcvarsall.bat`)を読み込んだ同一シェルセッション内
+で行ってください。
+
+```powershell
+# Developer PowerShell for VS 内で実行
+cd external\Rux
+.\Run.ps1 build -Compiler <LLVM 22 の clang++.exe へのパス>
+cd ..\..
+sh scripts/fetch_sdl3_windows.sh
+sh scripts/build_windows.sh --release
+```
+
+ビルド成果物は `Packages/App/Bin/Release/<OS>/<Arch>/RuxBoy[.exe]` に生成されます。
 
 ## 使い方
 
