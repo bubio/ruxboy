@@ -13,6 +13,18 @@ The core is a port of BubiBoy Lite (Odin + SDL2, MIT License) to Rux.
 
 Performance still has some rough edges. You'll probably need something in the Apple M4 class to run it comfortably.
 
+## Status
+
+RuxBoy is an experimental project exploring the Rux language by porting
+BubiBoy Lite's core. Core emulation (CPU, PPU, APU, MBC1/2/3/5, GBC features,
+savestates), the CLI frontend, and CI/CD covering macOS, Linux, and Windows
+are all in place, and release zips are built and attached automatically. It
+passes the Blargg, Mooneye acceptance, and dmg-acid2/cgb-acid2 test suites,
+with 3 known Mooneye edge-case failures (`rapid_toggle`, `reti_timing`,
+`stat_lyc_onoff`) that are tracked but not yet fixed. Windows arm64 is not
+yet supported. Performance is still rough on typical hardware, as noted
+above.
+
 <p align="center">
   <a href="https://github.com/bubio/ruxboy/releases/latest">
     <img src="https://img.shields.io/github/v/release/bubio/ruxboy" alt="Latest Release">
@@ -94,18 +106,15 @@ The build output is placed at `Packages/App/Bin/Release/<OS>/<Arch>/RuxBoy[.exe]
 ## Usage
 
 ```
-使用法: RuxBoy [options] game.gbc
+Usage: RuxBoy [options] game.gbc
 
-  -h, --help        コマンドラインの使い方を表示
-  -v, --version     バージョンを表示
-  --scale N         表示倍率 (1-8、9以上は8に丸める、デフォルト 4)
-  --fullscreen      フルスクリーン表示 (--scale は無視される)
-  --shader KIND     シェーダー: nearest, smooth (デフォルト nearest)
-  --recent          最近使ったROMの一覧を表示して終了
+  -h, --help        Show command-line usage
+  -v, --version     Show version
+  --scale N         Display scale (1-8, values above 8 are clamped to 8, default 4)
+  --fullscreen      Fullscreen display (--scale is ignored)
+  --shader KIND     Shader: nearest, smooth (default nearest)
+  --recent          List recently used ROMs and exit
 ```
-
-(The CLI's own `--help` output is currently Japanese-only; an English
-translation isn't provided yet.)
 
 ### Keyboard shortcuts (while a ROM is running)
 

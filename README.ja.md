@@ -13,6 +13,17 @@ Game Boy Color エミュレーター。[Rux 言語](https://rux-lang.dev/) で�
 
 まだパフォーマンスに難があります。Apple M4相当のパワーがあればまともに動作すると思います。
 
+## 現状
+
+RuxBoy は Rux 言語を試すための実験的プロジェクトで、BubiBoy Lite のコアを
+移植したものです。エミュレーション本体(CPU / PPU / APU / MBC1/2/3/5 /
+GBC機能 / セーブステート)、CLIフロントエンド、macOS / Linux / Windows を
+カバーするCI/CDは一通り揃っており、リリースzipも自動でビルド・添付されます。
+Blargg・Mooneye acceptance・dmg-acid2/cgb-acid2 の各テストスイートを通過して
+いますが、Mooneye の3件(`rapid_toggle`、`reti_timing`、`stat_lyc_onoff`)は
+既知のエッジケースとして未修正のまま残っています。Windows arm64 は未対応
+です。前述のとおり、一般的なハードウェアではまだパフォーマンスに難があります。
+
 <p align="center">
   <a href="https://github.com/bubio/ruxboy/releases/latest">
     <img src="https://img.shields.io/github/v/release/bubio/ruxboy" alt="Latest Release">
