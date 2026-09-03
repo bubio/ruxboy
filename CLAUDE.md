@@ -72,7 +72,9 @@ SDL2 コードをそのまま読み替えると間違える。
 BluePrint の優先順どおり、**macOS を完成させてから**他へ広げる。
 
 1. macOS 13.5+ / Intel・Apple Silicon
-2. Ubuntu 24.04+ / amd64・arm64
+2. Ubuntu 26.04+ / amd64・arm64（BluePrint は 24.04+ だが、Rux コンパイラ要件の
+   Clang 22.1+ / CMake 3.30+ と SDL3 が 24.04 の archive に無いため 26.04+ へ変更。
+   2026-09-03 にユーザー承認済み、経緯は `docs/dev/phases/phase-09-cicd.md` 0節）
 3. Windows 11+ / x64・arm64
 
 配布は GitHub Releases、全プラットフォーム zip、CLI アプリとして提供。バージョンはセマンティックバージョニング（ビルド番号がある場合は 1 からの連番）。ライセンスは BubiBoy Lite に準じる（MIT）。
