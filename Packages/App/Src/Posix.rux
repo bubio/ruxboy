@@ -378,7 +378,12 @@ func LinuxArgv(argcOut: *var int32) -> *var *var char8 {
 /// 実装コストに見合わないと判断した。必要になれば拡張する。
 /// 返す配列・文字列はプロセス終了まで生き続ける前提でfreeしない(Linux/macOS版と同じ)。
 func WindowsArgv(argcOut: *var int32) -> *var *var char8 {
-    let cmdline = GetCommandLineA();
+    // `LinuxArgv`と同じ理由(全ターゲットで型検査が通る必要がある)で、
+    // Windows専用の`GetCommandLineA`呼び出しを`when`で囲む。
+    var cmdline: *char8 = null;
+    when #target.os == .Windows {
+        cmdline = GetCommandLineA();
+    }
     var len: uint = 0;
     while *(cmdline + len) != 0 { len += 1; }
 

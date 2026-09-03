@@ -166,6 +166,12 @@ jobs:
         working-directory: external/Rux
         run: |
           ./.github/scripts/Enter-VsDevEnv.ps1 -Arch amd64
+          # windows-latestランナーはVS同梱のCommonExtensions\Microsoft\CMake配下にも
+          # cmake.exe/ninja.exeを持ち、素のcmake.exe/ninja.exeと重複する。Run.ps1の
+          # Find-ToolはGet-Command(-All無し)を使うため両方あると配列が返り、
+          # Invoke-Checked -FilePathが[string]型変換エラーで失敗する
+          # (ローカル実機でも踏んだ問題、docs/dev/phases/phase-09-cicd.md 5.1参照)。
+          $env:Path = ($env:Path -split ';' | Where-Object { $_ -notmatch 'CommonExtensions\\Microsoft\\CMake' }) -join ';'
           ./Run.ps1 build -Compiler "$env:GITHUB_WORKSPACE/llvm22/bin/clang++.exe"
 
       - name: Fetch Test ROMs
