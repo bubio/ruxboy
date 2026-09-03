@@ -1,7 +1,9 @@
 /// 設定ファイル(config.txt)の読み込み/生成。
 /// 移植元: `~/dev/_Emu/BubiBoyLite/src/app/config.odin`。BubiBoy Lite は「実行ファイルと
 /// 同じ場所」に置いたが、`docs/BluePrint.md`「設定ファイルなどの置き場所はOSの習慣に
-/// 従うこと」により、macOSでは `~/Library/Application Support/RuxBoy/config.txt` に変更した
+/// 従うこと」により、macOSでは `~/Library/Application Support/RuxBoy/config.txt`、
+/// LinuxではXDG Base Directory準拠で `$XDG_CONFIG_HOME/RuxBoy/config.txt`
+/// (未設定なら `~/.config/RuxBoy/config.txt`) に変更した
 /// (BubiBoy Lite の決定はRuxBoyにそのまま適用されない、CLAUDE.md参照)。
 ///
 /// フォーマット: TOMLではなく`key = value`の単純な行指向テキスト(`#`から行末はコメント)。
@@ -13,7 +15,7 @@
 /// 表示言語(lang)は移植対象外(フェーズ8では固定のデフォルトキー配置のみ、
 /// TUIが無いため設定用メニューも無い)。将来必要になれば追加する。
 
-import Core::Slice;
+import Core::{ Slice, #target };
 
 pub const ConfigDefaultVolume: int32 = 100;
 
@@ -33,18 +35,49 @@ pub func ConfigDefault() -> AppConfig {
     return c;
 }
 
-/// `~/Library/Application Support/RuxBoy` を`buf`へ書く。HOME未設定時はfalse。
-func AppSupportDir(buf: *var PathBuf) -> bool {
-    let home = GetEnv("HOME\0".data);
-    if home == null { return false; }
-    PathBufClear(buf);
-    PathBufAppendCStr(buf, home);
-    PathBufAppend(buf, "/Library/Application Support/RuxBoy");
-    return true;
+/// アプリのデータ保存先ディレクトリ(設定ファイル・最近使ったROM一覧)を`buf`へ書く。
+/// macOS: `~/Library/Application Support/RuxBoy`。
+/// Linux: `$XDG_CONFIG_HOME/RuxBoy`(未設定/空なら`~/.config/RuxBoy`、
+/// XDG Base Directory仕様準拠。docs/dev/PLAN.md 1.6)。
+/// 必要な環境変数が無ければfalse。
+///
+/// Linuxでは`$XDG_CONFIG_HOME`自体(既定なら`~/.config`)が存在しない環境に備え、
+/// ここで1段先に作っておく。`EnsureDirectory`は深さ1つしか掘れないため
+/// (`Posix.rux`参照)、`RuxBoy`サブディレクトリの作成は呼び出し側の責務のまま残す。
+pub func AppDataDir(buf: *var PathBuf) -> bool {
+    when #target.os {
+        .macOS => {
+            let home = GetEnv("HOME\0".data);
+            if home == null { return false; }
+            PathBufClear(buf);
+            PathBufAppendCStr(buf, home);
+            PathBufAppend(buf, "/Library/Application Support/RuxBoy");
+            return true;
+        }
+        .Linux => {
+            let xdgConfigHome = GetEnv("XDG_CONFIG_HOME\0".data);
+            if xdgConfigHome != null && *xdgConfigHome != 0 {
+                PathBufClear(buf);
+                PathBufAppendCStr(buf, xdgConfigHome);
+            } else {
+                let home = GetEnv("HOME\0".data);
+                if home == null { return false; }
+                PathBufClear(buf);
+                PathBufAppendCStr(buf, home);
+                PathBufAppend(buf, "/.config");
+            }
+            EnsureDirectory(PathBufCStr(buf));
+            PathBufAppend(buf, "/RuxBoy");
+            return true;
+        }
+        else => {
+            return false;
+        }
+    }
 }
 
 func ConfigFilePath(buf: *var PathBuf) -> bool {
-    if !AppSupportDir(buf) { return false; }
+    if !AppDataDir(buf) { return false; }
     PathBufAppend(buf, "/config.txt");
     return true;
 }
@@ -124,7 +157,7 @@ func RenderConfig(config: *AppConfig, buf: *var PathBuf) {
 
 pub func ConfigSave(config: *AppConfig) -> bool {
     var dirBuf: PathBuf;
-    if !AppSupportDir(@dirBuf) { return false; }
+    if !AppDataDir(@dirBuf) { return false; }
     if !EnsureDirectory(PathBufCStr(@dirBuf)) { return false; }
 
     var body: PathBuf;

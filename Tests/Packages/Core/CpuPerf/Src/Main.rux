@@ -1,7 +1,13 @@
-import Core::Slice;
+import Core::{ Slice, #target, #Error };
 import GbCore::{ Cpu, Bus, GbMode, CpuReset, BusInit, BusPowerOn, BusLoadRom, CpuStep };
 
-#Link("libSystem.B.dylib")
+when #target.os {
+    .macOS => const LibC = "libSystem.B.dylib";
+    .Linux => const LibC = "libc.so.6";
+    else => #Error("Unsupported operating system")
+}
+
+#Link(LibC)
 extern {
     func write(fd: int32, buf: *opaque, count: uint) -> int64;
     func gettimeofday(tv: *var TimeVal, tz: *opaque) -> int32;

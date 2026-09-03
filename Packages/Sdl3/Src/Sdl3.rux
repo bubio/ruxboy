@@ -3,22 +3,40 @@
 // spikes/Sdl3Probe/Src/Sdl3.rux を Packages/Sdl3 へ昇格させたもの。
 // フェーズごとに必要な API を追記していく。
 
-import Core::{ Slice, #config };
+import Core::{ Slice, #config, #target, #Error };
 
-// #Link に渡した文字列は Mach-O のロードコマンドへそのまま入る。素の名前
-// （libSDL3.dylib）だと Apple Silicon の Homebrew は dyld の既定検索パスに
+// #Link に渡した文字列は Mach-O/ELF のロードコマンドへそのまま入る。macOS では
+// 素の名前（libSDL3.dylib）だと Apple Silicon の Homebrew は dyld の既定検索パスに
 // 含まれず解決できないため、ビルド時に --define SDL_PREFIX=<prefix> を渡して
 // 絶対パスを埋め込む。#Link は文字列リテラルかコンパイル時文字列定数しか
 // 受け付けない（#config.Get(...) を直接は書けない）ので、既知の prefix を
 // when で選ぶ形にしている。
-when #config.Get("SDL_PREFIX") == "/opt/homebrew" {
-    pub const SdlLibrary: Slice<char8> = "/opt/homebrew/lib/libSDL3.dylib";   // Homebrew (Apple Silicon)
-} else when #config.Get("SDL_PREFIX") == "/usr/local" {
-    pub const SdlLibrary: Slice<char8> = "/usr/local/lib/libSDL3.dylib";      // Homebrew (Intel)
-} else when #config.Get("SDL_PREFIX") == "/opt/local" {
-    pub const SdlLibrary: Slice<char8> = "/opt/local/lib/libSDL3.dylib";      // MacPorts
-} else {
-    pub const SdlLibrary: Slice<char8> = "libSDL3.dylib";                     // 既定の検索パスに任せる
+//
+// Linux は ELF の DT_NEEDED に素の SONAME（libSDL3.so.0）を入れれば ld.so の
+// 既定検索パス（ldconfig キャッシュ）で解決される（apt の libsdl3-dev は /usr
+// へ入るため既定キャッシュに乗る）。ただし ~/.local 等、ldconfig の既定検索対象
+// に含まれない prefix へ install した場合は解決できないため、既知の非標準
+// prefix だけ絶対パスへ分岐する（docs/dev/PLAN.md 1.3）。
+when #target.os {
+    .macOS => {
+        when #config.Get("SDL_PREFIX") == "/opt/homebrew" {
+            pub const SdlLibrary: Slice<char8> = "/opt/homebrew/lib/libSDL3.dylib";   // Homebrew (Apple Silicon)
+        } else when #config.Get("SDL_PREFIX") == "/usr/local" {
+            pub const SdlLibrary: Slice<char8> = "/usr/local/lib/libSDL3.dylib";      // Homebrew (Intel)
+        } else when #config.Get("SDL_PREFIX") == "/opt/local" {
+            pub const SdlLibrary: Slice<char8> = "/opt/local/lib/libSDL3.dylib";      // MacPorts
+        } else {
+            pub const SdlLibrary: Slice<char8> = "libSDL3.dylib";                     // 既定の検索パスに任せる
+        }
+    }
+    .Linux => {
+        when #config.Get("SDL_PREFIX") == "/usr/local" {
+            pub const SdlLibrary: Slice<char8> = "/usr/local/lib/libSDL3.so.0";       // ソースからの手動install
+        } else {
+            pub const SdlLibrary: Slice<char8> = "libSDL3.so.0";                      // apt (/usr) など既定検索パスに任せる
+        }
+    }
+    else => #Error("Unsupported operating system")
 }
 
 // --- 定数 ---------------------------------------------------------------

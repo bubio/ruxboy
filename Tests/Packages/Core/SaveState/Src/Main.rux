@@ -16,7 +16,7 @@
 // 新規インスタンスならロード前は初期値(0等)なので、保存漏れがあれば実行が
 // 分岐し、H1とH2が食い違う。
 
-import Core::{ Slice, MutableSlice };
+import Core::{ Slice, MutableSlice, #target, #Error };
 import GbCore::{
     Cpu, Bus, GbMode, CyclesPerFrame,
     CpuReset, BusInit, BusPowerOn, BusLoadRom, BusWrite, CpuStep,
@@ -24,7 +24,13 @@ import GbCore::{
     JoypadSetButton, JoypadUp, JoypadA
 };
 
-#Link("libSystem.B.dylib")
+when #target.os {
+    .macOS => const LibC = "libSystem.B.dylib";
+    .Linux => const LibC = "libc.so.6";
+    else => #Error("Unsupported operating system")
+}
+
+#Link(LibC)
 extern {
     func open(path: *char8, flags: int32, ...) -> int32;
     func read(fd: int32, buf: *var opaque, count: uint) -> int64;

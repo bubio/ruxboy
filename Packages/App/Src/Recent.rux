@@ -8,11 +8,7 @@ pub const RecentMaxEntries: uint = 10;
 
 func RecentFilePath(buf: *var PathBuf) -> bool {
     var dirBuf: PathBuf;
-    let home = GetEnv("HOME\0".data);
-    if home == null { return false; }
-    PathBufClear(@dirBuf);
-    PathBufAppendCStr(@dirBuf, home);
-    PathBufAppend(@dirBuf, "/Library/Application Support/RuxBoy");
+    if !AppDataDir(@dirBuf) { return false; }
     if !EnsureDirectory(PathBufCStr(@dirBuf)) { return false; }
 
     PathBufClear(buf);

@@ -64,7 +64,62 @@ jobs:
         run: |
           case "$(uname -m)" in
             arm64)  arch=AArch64 ;;
-            x86_64) arch=X86_64 ;;
+            x86_64) arch=x86-64 ;;
           esac
           bin="Packages/App/Bin/Release/macOS/$arch/RuxBoy"
+          test -x "$bin" && echo "OK: $bin"
+
+  build-linux:
+    name: Build & Test (Linux)
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            arch: x86-64
+          - runner: ubuntu-26.04-arm
+            arch: AArch64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Checkout external/Rux submodule
+        run: git submodule update --init --depth 1 external/Rux
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsdl3-dev
+
+      - name: Cache Rux compiler
+        uses: actions/cache@v4
+        id: cache-rux
+        with:
+          path: external/Rux/Bin
+          key: rux-compiler-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('external/Rux/**/*.cpp', 'external/Rux/**/*.h', 'external/Rux/Run.sh') }}
+
+      - name: Build Rux compiler
+        if: steps.cache-rux.outputs.cache-hit != 'true'
+        working-directory: external/Rux
+        run: sh Run.sh build --compiler /usr/bin/clang++-22
+
+      - name: Fetch Test ROMs
+        run: sh scripts/fetch_test_roms.sh
+
+      - name: Run Tests (Debug)
+        run: sh scripts/test.sh
+
+      - name: Run Tests (Release)
+        run: sh scripts/test.sh --release
+
+      - name: Build RuxBoy (Debug)
+        run: sh scripts/build_linux.sh --debug
+
+      - name: Build RuxBoy (Release)
+        run: sh scripts/build_linux.sh --release
+
+      - name: Verify binary exists
+        run: |
+          bin="Packages/App/Bin/Release/Linux/${{ matrix.arch }}/RuxBoy"
           test -x "$bin" && echo "OK: $bin"

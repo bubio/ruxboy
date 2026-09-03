@@ -1,4 +1,4 @@
-import Core::Slice;
+import Core::{ Slice, #target, #Error };
 import GbCore::{
     Cpu, Bus, GbMode, CyclesPerFrame,
     CpuReset, BusInit, BusPowerOn, BusLoadRom, CpuStep
@@ -10,7 +10,13 @@ import GbCore::{
 // (mattcurrie/dmg-acid2 v1.0 リリース同梱)で目視確認済みの値をそのまま流用する
 // (PPU描画ロジックはppu.odinの忠実な移植のため、一致すれば移植の正しさの強い裏付けになる)。
 
-#Link("libSystem.B.dylib")
+when #target.os {
+    .macOS => const LibC = "libSystem.B.dylib";
+    .Linux => const LibC = "libc.so.6";
+    else => #Error("Unsupported operating system")
+}
+
+#Link(LibC)
 extern {
     func open(path: *char8, flags: int32, ...) -> int32;
     func read(fd: int32, buf: *var opaque, count: uint) -> int64;

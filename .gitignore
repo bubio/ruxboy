@@ -8,7 +8,7 @@ Packages/*/Temp/
 .DS_Store
 
 # fetched test ROM artifacts
-Tests/roms/
+tests/roms/
 
 # グローバル gitignore で Packages/ が除外されている場合に備えて明示的に追跡する
 !Packages/

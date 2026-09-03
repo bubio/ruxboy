@@ -3,14 +3,20 @@
 // (ROM同梱readme.txt記載の方式)。0xA001-3が signature 0xDE,0xB0,0x61 なら
 // 0xA000 が有効な結果コード(実行中は0x80、終了後は最終コード。0=PASS)。
 
-import Core::Slice;
+import Core::{ Slice, #target, #Error };
 import GbCore::{
     Cpu, Bus, GbMode,
     CpuReset, BusInit, BusPowerOn, BusLoadRom, CpuStep,
     BusRead
 };
 
-#Link("libSystem.B.dylib")
+when #target.os {
+    .macOS => const LibC = "libSystem.B.dylib";
+    .Linux => const LibC = "libc.so.6";
+    else => #Error("Unsupported operating system")
+}
+
+#Link(LibC)
 extern {
     func open(path: *char8, flags: int32, ...) -> int32;
     func read(fd: int32, buf: *var opaque, count: uint) -> int64;
