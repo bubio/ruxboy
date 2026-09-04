@@ -9,4 +9,4 @@
 
 import Core::Slice;
 
-pub const AppVersion: Slice<char8> = "0.1.0";
+pub const AppVersion: Slice<char8> = "0.1.1";
