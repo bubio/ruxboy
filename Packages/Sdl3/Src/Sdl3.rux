@@ -163,7 +163,10 @@ pub extern {
     func SDL_PushEvent(event: *var SdlEvent) -> bool8;
     func SDL_PumpEvents();
     // SDL_audio.h
+    func SDL_GetCurrentAudioDriver() -> *char8;
+    func SDL_GetAudioDeviceFormat(devid: uint32, spec: *var SdlAudioSpec, sampleFrames: *var int32) -> bool8;
     func SDL_OpenAudioDeviceStream(devid: uint32, spec: *SdlAudioSpec, callback: *opaque, userdata: *opaque) -> *opaque;
+    func SDL_GetAudioStreamFormat(stream: *opaque, srcSpec: *var SdlAudioSpec, dstSpec: *var SdlAudioSpec) -> bool8;
     func SDL_PutAudioStreamData(stream: *opaque, buf: *opaque, len: int32) -> bool8;
     func SDL_ResumeAudioStreamDevice(stream: *opaque) -> bool8;
     func SDL_GetAudioStreamQueued(stream: *opaque) -> int32;

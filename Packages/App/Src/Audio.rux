@@ -4,12 +4,51 @@
 /// `docs/dev/phases/phase-05-apu.md`「スコープの調整」によりフェーズ8へ持ち越されていた分)。
 
 import Core::MutableSlice;
+import Core::Slice;
 import GbCore::{ Apu, ApuDrainSamples };
 import Sdl3::{
     SdlAudioS16Le, SdlAudioDeviceDefaultPlayback, SdlAudioSpec,
-    SDL_OpenAudioDeviceStream, SDL_PutAudioStreamData, SDL_ResumeAudioStreamDevice,
-    SDL_GetAudioStreamQueued, SDL_DestroyAudioStream, SDL_Delay,
+    SDL_GetCurrentAudioDriver, SDL_GetAudioDeviceFormat,
+    SDL_OpenAudioDeviceStream, SDL_GetAudioStreamFormat,
+    SDL_PutAudioStreamData, SDL_ResumeAudioStreamDevice,
+    SDL_GetAudioStreamQueued, SDL_DestroyAudioStream, SDL_Delay, SDL_GetError,
 };
+
+/// 診断ログ用の1行バッファ。実機でしか再現しない音声不具合を、現地で1回
+/// 実行しただけで手がかりが揃うようにするための最小限の仕組み
+/// (`PrintLine`は`Main.rux`のprivate関数で、`Slice`の連結もできないため、
+/// 既存の`PathBuf`を使い回して組み立てる)。
+func AudioLogLine(buf: *var PathBuf) {
+    PathBufAppendByte(buf, c8'\n');
+    let line = PathBufAsSlice(buf);
+    PlatformWrite(1, line.data as *opaque, line.length as uint);
+}
+
+/// `AudioInit`が無音のまま失敗した場合に原因を残すための最小限のログ出力。
+/// (`stream==null`を許容する設計上、呼び出し側は失敗してもクラッシュしない
+/// ため、ここで出しておかないと原因調査の手がかりが一切残らない。)
+func AudioLogError(prefix: Slice<char8>) {
+    var buf: PathBuf;
+    PathBufClear(@buf);
+    PathBufAppend(@buf, prefix);
+    PathBufAppendCStr(@buf, SDL_GetError());
+    AudioLogLine(@buf);
+}
+
+/// デバイスのネイティブフォーマット(`SdlAudioSpec`)を1行に整形する。
+func AudioLogSpec(prefix: Slice<char8>, spec: *SdlAudioSpec) {
+    var buf: PathBuf;
+    PathBufClear(@buf);
+    PathBufAppend(@buf, prefix);
+    PathBufAppend(@buf, "format=");
+    PathBufAppendInt(@buf, spec.format as int32);
+    PathBufAppend(@buf, "(S16LE=32784)");
+    PathBufAppend(@buf, " channels=");
+    PathBufAppendInt(@buf, spec.channels);
+    PathBufAppend(@buf, " freq=");
+    PathBufAppendInt(@buf, spec.freq);
+    AudioLogLine(@buf);
+}
 
 const SampleRate: int32 = 48000;
 const Channels: int32 = 2;
@@ -17,21 +56,62 @@ const BytesPerSample: int32 = 2;
 /// ペーシングの目標: キューに積まれたバイト数がこれを超える間は新フレームの
 /// 生成を待つ(=オーディオの消費速度で実行速度が決まる)。約4フレーム分。
 const TargetQueuedBytes: int32 = (SampleRate / 60) * Channels * BytesPerSample * 4;
+/// 実行時ステータスをログに出す間隔(フレーム数、約1秒)。毎フレーム出すと
+/// 標準出力がスクロールして読めなくなるうえ処理も遅くなるため。
+const StatsLogIntervalFrames: int32 = 60;
 
 pub struct Audio {
     pub stream: *opaque;
+    pub frameCount: int32;
+    pub everNonZeroSample: bool;
+    pub putFailedLogged: bool;
+    /// Ruxコンパイラのmacos-x86_64ターゲット向けコード生成バグの回避用ダミー
+    /// フィールド。削除禁止。詳細は docs/dev/PLAN.md 1.2「Ruxコンパイラの
+    /// 既知バグ」を参照。
+    reserved: int64;
 }
 
 pub func AudioInit() -> Audio {
     var a: Audio;
+    a.frameCount = 0;
+    a.everNonZeroSample = false;
+    a.putFailedLogged = false;
+    a.reserved = 0;
+
+    var driverBuf: PathBuf;
+    PathBufClear(@driverBuf);
+    PathBufAppend(@driverBuf, "audio: driver=");
+    PathBufAppendCStr(@driverBuf, SDL_GetCurrentAudioDriver());
+    AudioLogLine(@driverBuf);
+
+    var deviceSpec: SdlAudioSpec;
+    var deviceSampleFrames: int32 = 0;
+    if SDL_GetAudioDeviceFormat(SdlAudioDeviceDefaultPlayback, @deviceSpec, @deviceSampleFrames) {
+        AudioLogSpec("audio: default device native ", @deviceSpec);
+    } else {
+        AudioLogError("audio: SDL_GetAudioDeviceFormat に失敗: ");
+    }
+
     var spec: SdlAudioSpec;
     spec.format = SdlAudioS16Le;
     spec.channels = Channels;
     spec.freq = SampleRate;
 
     a.stream = SDL_OpenAudioDeviceStream(SdlAudioDeviceDefaultPlayback, @spec, null, null);
-    if a.stream != null {
-        SDL_ResumeAudioStreamDevice(a.stream);
+    if a.stream == null {
+        AudioLogError("audio: SDL_OpenAudioDeviceStream に失敗: ");
+        return a;
+    }
+
+    var srcSpec: SdlAudioSpec;
+    var dstSpec: SdlAudioSpec;
+    if SDL_GetAudioStreamFormat(a.stream, @srcSpec, @dstSpec) {
+        AudioLogSpec("audio: stream src(app) ", @srcSpec);
+        AudioLogSpec("audio: stream dst(device) ", @dstSpec);
+    }
+
+    if !SDL_ResumeAudioStreamDevice(a.stream) {
+        AudioLogError("audio: SDL_ResumeAudioStreamDevice に失敗: ");
     }
     return a;
 }
@@ -41,8 +121,9 @@ pub func AudioIsValid(a: *Audio) -> bool {
 }
 
 /// `volume`(0-100)を適用しつつ、APUに溜まっているサンプルをオーディオストリームへ
-/// 送る。
-pub func AudioPushFrame(a: *Audio, apu: *var Apu, volume: int32) {
+/// 送る。あわせて、実機でしか再現しない不具合を1回の実行で追えるよう、
+/// 定期的に稼働状況(キュー滞留量・生成サンプル数・無音判定)をログへ残す。
+pub func AudioPushFrame(a: *var Audio, apu: *var Apu, volume: int32) {
     if a.stream == null { return; }
 
     var buf: int16[4096];
@@ -57,7 +138,40 @@ pub func AudioPushFrame(a: *Audio, apu: *var Apu, volume: int32) {
         }
     }
 
-    SDL_PutAudioStreamData(a.stream, @buf[0] as *opaque, (drained * 2) as int32);
+    if !a.everNonZeroSample {
+        var i: uint = 0;
+        while i < drained {
+            if buf[i] != 0 {
+                a.everNonZeroSample = true;
+                break;
+            }
+            i += 1;
+        }
+    }
+
+    if !SDL_PutAudioStreamData(a.stream, @buf[0] as *opaque, (drained * 2) as int32) {
+        if !a.putFailedLogged {
+            a.putFailedLogged = true;
+            AudioLogError("audio: SDL_PutAudioStreamData に失敗(以後は再表示しない): ");
+        }
+    }
+
+    a.frameCount += 1;
+    if a.frameCount % StatsLogIntervalFrames == 0 {
+        var statsBuf: PathBuf;
+        PathBufClear(@statsBuf);
+        PathBufAppend(@statsBuf, "audio: frame=");
+        PathBufAppendInt(@statsBuf, a.frameCount);
+        PathBufAppend(@statsBuf, " queuedBytes=");
+        PathBufAppendInt(@statsBuf, SDL_GetAudioStreamQueued(a.stream));
+        PathBufAppend(@statsBuf, " drainedThisFrame=");
+        PathBufAppendInt(@statsBuf, drained as int32);
+        PathBufAppend(@statsBuf, " volume=");
+        PathBufAppendInt(@statsBuf, volume);
+        PathBufAppend(@statsBuf, " everNonZeroSample=");
+        PathBufAppend(@statsBuf, a.everNonZeroSample ? "true" : "false");
+        AudioLogLine(@statsBuf);
+    }
 }
 
 /// キューが溜まりすぎないよう待つ(オーディオ駆動ペーシング。壁時計は読まない)。

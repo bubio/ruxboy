@@ -24,6 +24,10 @@ pub struct AppConfig {
     pub fullscreen: bool;
     pub smooth: bool;
     pub volume: int32;
+    /// Ruxコンパイラのmacos-x86_64ターゲット向けコード生成バグの回避用ダミー
+    /// フィールド。削除禁止。詳細は docs/dev/PLAN.md 1.2「Ruxコンパイラの
+    /// 既知バグ」を参照。
+    reserved: int64;
 }
 
 pub func ConfigDefault() -> AppConfig {
@@ -32,6 +36,7 @@ pub func ConfigDefault() -> AppConfig {
     c.fullscreen = false;
     c.smooth = false;
     c.volume = ConfigDefaultVolume;
+    c.reserved = 0;
     return c;
 }
 

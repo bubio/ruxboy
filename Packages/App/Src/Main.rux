@@ -125,6 +125,9 @@ func Main() -> int {
     }
 
     var audio = AudioInit();
+    if !AudioIsValid(@audio) {
+        PrintLine("オーディオデバイスのオープンに失敗しました。音声なしで続行します。");
+    }
 
     var running = true;
     var frameCount: int32 = 0;
