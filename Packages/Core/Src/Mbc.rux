@@ -134,9 +134,14 @@ pub func CartridgeInit(cart: *var Cartridge, rom: Slice<uint8>) -> CartridgePars
 
 // --- 共通ヘルパー(バンク境界の正規化) ---
 
+// romBanks はヘッダの0x0148(ROMサイズコード)から `2 << code` で求めるため
+// 常に2の冪(RomSizeFromCode参照)。ROMの全バイトアクセス(オペコード
+// フェッチ含む、CPU全命令で複数回発生する最も熱いパス)のたびに実行される
+// ため、剰余演算をビットマスクに置き換える(HareGirl 17856de と同じ対策、
+// docs/PerformanceNotes.md 7章参照)。
 func NormalizedRomBank(cart: *Cartridge, bank: uint) -> uint {
     if cart.info.romBanks == 0 { return 0; }
-    return bank % cart.info.romBanks;
+    return bank & (cart.info.romBanks - 1);
 }
 
 func ReadRomBank(cart: *Cartridge, bank: uint, offset: uint16) -> uint8 {
@@ -150,10 +155,13 @@ func MbcRamBankCount(cart: *Cartridge) -> uint {
     return cart.ramLength / RamBankSize;
 }
 
+// count(= ramLength/8KiB)はヘッダの0x0149(RAMサイズコード)から決まる値
+// {0,1,4,8,16}(RamSizeFromCode参照)で、0を除き常に2の冪。NormalizedRomBank
+// と同じ理由でビットマスクに置き換える。
 func NormalizedRamBank(cart: *Cartridge, bank: uint) -> uint {
     let count = MbcRamBankCount(cart);
     if count == 0 { return 0; }
-    return bank % count;
+    return bank & (count - 1);
 }
 
 func ReadRamBank(cart: *Cartridge, bank: uint, offset: uint16) -> uint8 {
